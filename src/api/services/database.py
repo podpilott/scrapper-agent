@@ -496,8 +496,9 @@ class DatabaseService:
                         "score": score,
                     })
 
-            # Sort by score (desc), then by date (desc)
-            matches.sort(key=lambda x: (-x["score"], x["created_at"]), reverse=False)
+            # Sort by: leads (desc), then score (desc), then date (desc)
+            # Prioritize jobs with actual leads over empty ones
+            matches.sort(key=lambda x: (-x["total_leads"], -x["score"], x["created_at"]))
             return matches[:limit]
 
         except Exception as e:
