@@ -1,6 +1,6 @@
 """Database service for Supabase PostgreSQL operations."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from supabase import Client, create_client
@@ -318,6 +318,217 @@ class DatabaseService:
         """Get public demo leads."""
         result = self.client.table("demo_leads").select("*").limit(10).execute()
         return result.data or []
+
+    # ============== Ban Operations ==============
+
+    def is_user_banned(self, user_id: str) -> bool:
+        """Check if user is banned.
+
+        Args:
+            user_id: The user ID to check.
+
+        Returns:
+            True if user is banned and ban is active, False otherwise.
+        """
+        try:
+            result = (
+                self.client.table("banned_users")
+                .select("id, reason, expires_at")
+                .eq("user_id", user_id)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not result.data:
+                return False
+
+            # Check if ban has expired
+            ban = result.data[0]
+            expires_at = ban.get("expires_at")
+            if expires_at:
+                from datetime import datetime
+                expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if datetime.now(expiry.tzinfo) > expiry:
+                    # Ban expired, deactivate it
+                    self.client.table("banned_users").update(
+                        {"is_active": False}
+                    ).eq("id", ban["id"]).execute()
+                    return False
+
+            return True
+        except Exception as e:
+            logger.warning("ban_check_failed", user_id=user_id, error=str(e))
+            return False  # Fail open - don't block on error
+
+    def ban_user(
+        self,
+        user_id: str,
+        reason: str,
+        banned_by: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Ban a user.
+
+        Args:
+            user_id: The user ID to ban.
+            reason: Reason for the ban.
+            banned_by: Admin user ID who issued the ban.
+            expires_at: Optional expiration time for the ban.
+
+        Returns:
+            The created ban record.
+        """
+        data = {
+            "user_id": user_id,
+            "reason": reason,
+            "banned_by": banned_by,
+            "is_active": True,
+        }
+        if expires_at:
+            data["expires_at"] = expires_at.isoformat()
+
+        result = self.client.table("banned_users").insert(data).execute()
+        logger.info("user_banned", user_id=user_id, reason=reason)
+        return result.data[0] if result.data else {}
+
+    def unban_user(self, user_id: str) -> bool:
+        """Unban a user.
+
+        Args:
+            user_id: The user ID to unban.
+
+        Returns:
+            True if user was unbanned, False if no active ban found.
+        """
+        result = (
+            self.client.table("banned_users")
+            .update({"is_active": False})
+            .eq("user_id", user_id)
+            .eq("is_active", True)
+            .execute()
+        )
+        if result.data:
+            logger.info("user_unbanned", user_id=user_id)
+            return True
+        return False
+
+    # ============== Rate Limit Violation Operations ==============
+
+    def record_rate_limit_violation(self, user_id: str, endpoint: str) -> None:
+        """Record a rate limit violation for a user.
+
+        Args:
+            user_id: The user who hit the rate limit.
+            endpoint: The API endpoint that was rate limited.
+        """
+        try:
+            self.client.table("rate_limit_violations").insert({
+                "user_id": user_id,
+                "endpoint": endpoint,
+            }).execute()
+            logger.debug("violation_recorded", user_id=user_id, endpoint=endpoint)
+        except Exception as e:
+            logger.warning("record_violation_failed", user_id=user_id, error=str(e))
+
+    def get_violation_count(self, user_id: str, hours: int = 24) -> int:
+        """Count rate limit violations in the last N hours.
+
+        Args:
+            user_id: The user ID to check.
+            hours: Time window in hours (default 24).
+
+        Returns:
+            Number of violations in the time window.
+        """
+        try:
+            since = datetime.now(timezone.utc) - timedelta(hours=hours)
+            result = (
+                self.client.table("rate_limit_violations")
+                .select("id", count="exact")
+                .eq("user_id", user_id)
+                .gte("created_at", since.isoformat())
+                .execute()
+            )
+            return result.count or 0
+        except Exception as e:
+            logger.warning("get_violation_count_failed", user_id=user_id, error=str(e))
+            return 0
+
+    def check_and_auto_ban(self, user_id: str) -> bool:
+        """Check violation count and auto-ban if threshold exceeded.
+
+        Progressive thresholds:
+        - 20+ violations in 24h: 1 hour ban
+        - 50+ violations in 24h: 6 hour ban
+        - 100+ violations in 24h: 24 hour ban
+        - 200+ violations in 24h: 7 day ban
+
+        Args:
+            user_id: The user ID to check.
+
+        Returns:
+            True if user was banned, False otherwise.
+        """
+        try:
+            # Skip if already banned
+            if self.is_user_banned(user_id):
+                return False
+
+            count_24h = self.get_violation_count(user_id, hours=24)
+
+            # Progressive thresholds
+            if count_24h >= 200:
+                ban_hours = 24 * 7  # 7 days
+                reason = "Severe rate limit abuse (200+ violations in 24h)"
+            elif count_24h >= 100:
+                ban_hours = 24  # 24 hours
+                reason = "Heavy rate limit abuse (100+ violations in 24h)"
+            elif count_24h >= 50:
+                ban_hours = 6  # 6 hours
+                reason = "Moderate rate limit abuse (50+ violations in 24h)"
+            elif count_24h >= 20:
+                ban_hours = 1  # 1 hour
+                reason = "Rate limit abuse (20+ violations in 24h)"
+            else:
+                return False  # Below threshold
+
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=ban_hours)
+            self.ban_user(user_id, reason, expires_at=expires_at)
+            logger.warning(
+                "auto_ban_triggered",
+                user_id=user_id,
+                violations=count_24h,
+                ban_hours=ban_hours,
+            )
+            return True
+        except Exception as e:
+            logger.error("auto_ban_check_failed", user_id=user_id, error=str(e))
+            return False
+
+    def cleanup_old_violations(self, days: int = 7) -> int:
+        """Delete violations older than N days.
+
+        Args:
+            days: Delete violations older than this many days.
+
+        Returns:
+            Number of violations deleted.
+        """
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            result = (
+                self.client.table("rate_limit_violations")
+                .delete()
+                .lt("created_at", cutoff.isoformat())
+                .execute()
+            )
+            count = len(result.data) if result.data else 0
+            if count > 0:
+                logger.info("violations_cleaned_up", count=count, days=days)
+            return count
+        except Exception as e:
+            logger.warning("cleanup_violations_failed", error=str(e))
+            return 0
 
 
 # Global database service instance

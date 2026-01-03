@@ -3,19 +3,29 @@
 import json
 import re
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
+from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
+from src.api.services.database import db_service
 from src.generators.llm import LLMClient
 from src.utils.logger import get_logger
 
 router = APIRouter()
 logger = get_logger("query_route")
 
-# Rate limiter for this endpoint
-limiter = Limiter(key_func=get_remote_address)
+
+def get_user_id_for_limit(request: Request) -> str:
+    """Extract user_id from request state for rate limiting."""
+    # This is set by verify_supabase_token dependency
+    if hasattr(request.state, "user_id"):
+        return f"user:{request.state.user_id}"
+    return "unknown"
+
+
+# Rate limiter keyed by user_id
+limiter = Limiter(key_func=get_user_id_for_limit)
 
 # Security constants
 MAX_QUERY_LENGTH = 200
@@ -69,11 +79,27 @@ Return ONLY valid JSON, no other text.
 
 @router.post("/query/enhance", response_model=QueryEnhanceResponse)
 @limiter.limit("10/minute")
-async def enhance_query(request: Request, body: QueryEnhanceRequest) -> QueryEnhanceResponse:
+async def enhance_query(
+    request: Request,
+    body: QueryEnhanceRequest,
+    auth_user: AuthUser = Depends(verify_supabase_token),
+) -> QueryEnhanceResponse:
     """Analyze a query and suggest improvements.
 
-    Rate limited to 10 requests per minute per IP.
+    Requires authentication. Rate limited to 10 requests per minute per user.
     """
+    # Store user_id in request state for rate limiter
+    request.state.user_id = auth_user.user_id
+
+    # Check if user is banned
+    if db_service.is_configured():
+        if db_service.is_user_banned(auth_user.user_id):
+            logger.warning("banned_user_attempt", user_id=auth_user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. Your account has been restricted.",
+            )
+
     # Sanitize input
     query = sanitize_query(body.query)
 
