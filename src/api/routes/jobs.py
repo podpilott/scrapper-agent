@@ -607,3 +607,70 @@ async def cancel_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to cancel job",
         )
+
+
+@router.delete("/jobs/{job_id}/delete")
+async def delete_job(
+    job_id: str,
+    auth_user: AuthUser = Depends(verify_supabase_token),
+) -> dict:
+    """Delete a completed/failed/cancelled job from history."""
+    # Check in-memory first
+    job = job_manager.get_job(job_id)
+
+    if job:
+        # Check ownership
+        if job.user_id != auth_user.user_id and auth_user.user_id != "dev-user":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to delete this job",
+            )
+
+        # Can only delete completed/failed/cancelled jobs
+        if job.status in ("pending", "running"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete a running job. Cancel it first.",
+            )
+
+        # Remove from in-memory storage
+        if job_id in job_manager._jobs:
+            del job_manager._jobs[job_id]
+
+    # Delete from database
+    db = _get_db_service()
+    if db:
+        try:
+            db_job = db.get_job(job_id)
+            if db_job:
+                # Check ownership
+                if db_job["user_id"] != auth_user.user_id and auth_user.user_id != "dev-user":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Not authorized to delete this job",
+                    )
+
+                # Delete leads first (foreign key constraint)
+                db.client.table("leads").delete().eq("job_id", job_id).execute()
+                # Delete job
+                db.client.table("jobs").delete().eq("job_id", job_id).execute()
+
+                logger.info("job_deleted", job_id=job_id, user_id=auth_user.user_id)
+                return {"message": f"Job {job_id} deleted", "status": "deleted"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("delete_job_error", job_id=job_id, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete job",
+            )
+
+    # If job wasn't in memory and DB not configured, return not found
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found",
+        )
+
+    return {"message": f"Job {job_id} deleted", "status": "deleted"}
