@@ -67,6 +67,7 @@ class JobStatusResponse(BaseModel):
 class LeadResponse(BaseModel):
     """Response for a single lead."""
 
+    id: str | None = None  # Lead ID for research endpoint
     name: str
     phone: str | None = None
     email: str | None = None
@@ -90,6 +91,7 @@ class LeadResponse(BaseModel):
     is_claimed: bool | None = None
     years_in_business: int | None = None
     outreach: dict[str, Any] | None = None
+    research: dict[str, Any] | None = None  # LLM-generated research brief
 
 
 class JobListResponse(BaseModel):
@@ -124,3 +126,21 @@ class DuplicateCheckResponse(BaseModel):
     similar_jobs: list[SimilarJob] = []
     suggestions: list[str] = []  # LLM-generated alternative queries
     message: str | None = None
+
+
+class LeadResearch(BaseModel):
+    """LLM-generated research brief for a lead."""
+
+    overview: str  # 2-3 sentence business overview
+    pain_points: list[str] = []  # 3-5 potential pain points
+    opportunities: list[str] = []  # 2-3 reasons they might need user's product
+    talking_points: list[str] = []  # 2-3 conversation starters
+    generated_at: str  # ISO timestamp
+
+
+class LeadResearchResponse(BaseModel):
+    """Response for lead research generation."""
+
+    lead_id: str
+    research: LeadResearch
+    cached: bool = False  # Was this from cache?

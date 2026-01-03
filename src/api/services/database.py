@@ -420,6 +420,48 @@ class DatabaseService:
         )
         return result.data or []
 
+    def get_lead_by_id(self, lead_id: str) -> dict[str, Any] | None:
+        """Get a single lead by ID.
+
+        Args:
+            lead_id: The lead's unique ID.
+
+        Returns:
+            Lead data dict or None if not found.
+        """
+        try:
+            result = (
+                self.client.table("leads")
+                .select("*")
+                .eq("id", lead_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error("get_lead_by_id_failed", lead_id=lead_id, error=str(e))
+            return None
+
+    def update_lead_research(self, lead_id: str, research: dict[str, Any]) -> bool:
+        """Update lead with research data.
+
+        Args:
+            lead_id: The lead's unique ID.
+            research: Research data dict to save.
+
+        Returns:
+            True if update succeeded, False otherwise.
+        """
+        try:
+            self.client.table("leads").update({
+                "research": research
+            }).eq("id", lead_id).execute()
+            logger.debug("lead_research_updated", lead_id=lead_id)
+            return True
+        except Exception as e:
+            logger.error("update_lead_research_failed", lead_id=lead_id, error=str(e))
+            return False
+
     # ============== Query Duplicate Check Operations ==============
 
     def find_similar_jobs(

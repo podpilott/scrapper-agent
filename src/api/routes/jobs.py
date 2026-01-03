@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
+from slowapi import Limiter
+import jwt
 
 from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
 from src.api.schemas.responses import (
@@ -16,6 +18,8 @@ from src.api.schemas.responses import (
     JobProgress,
     JobStatusResponse,
     JobSummary,
+    LeadResearch,
+    LeadResearchResponse,
     LeadResponse,
 )
 from src.api.services.job_manager import job_manager
@@ -23,6 +27,25 @@ from src.utils.logger import get_logger
 
 router = APIRouter()
 logger = get_logger("jobs_route")
+
+
+def get_user_id_for_limit(request: Request) -> str:
+    """Extract user_id from JWT token for rate limiting."""
+    try:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            payload = jwt.decode(token, options={"verify_signature": False})
+            user_id = payload.get("sub")
+            if user_id:
+                request.state.user_id = user_id
+                return f"user:{user_id}"
+    except Exception:
+        pass
+    return "unknown"
+
+
+limiter = Limiter(key_func=get_user_id_for_limit)
 
 
 def _get_db_service():
@@ -418,6 +441,7 @@ async def get_job_leads(
                     raw = db_lead.get("raw_data", {})
                     leads.append(
                         LeadResponse(
+                            id=db_lead.get("id"),
                             name=db_lead.get("name", ""),
                             phone=db_lead.get("phone"),
                             email=db_lead.get("email"),
@@ -441,6 +465,7 @@ async def get_job_leads(
                             is_claimed=db_lead.get("is_claimed") or raw.get("is_claimed"),
                             years_in_business=safe_int(db_lead.get("years_in_business")) or safe_int(raw.get("years_in_business")),
                             outreach=db_lead.get("outreach") or raw.get("outreach"),
+                            research=db_lead.get("research"),
                         )
                     )
                 return leads
@@ -674,3 +699,129 @@ async def delete_job(
         )
 
     return {"message": f"Job {job_id} deleted", "status": "deleted"}
+
+
+# ============== Lead Research Endpoint ==============
+
+RESEARCH_PROMPT = """Analyze this business lead and provide a research brief.
+
+Business Information:
+- Name: {name}
+- Category: {category}
+- Address: {address}
+- Rating: {rating} ({review_count} reviews)
+- Website: {website}
+
+Product Context (what the user is selling):
+{product_context}
+
+Provide a JSON response with:
+{{
+  "overview": "2-3 sentence summary of what this business does and their market position",
+  "pain_points": ["3-5 potential pain points or challenges they might face"],
+  "opportunities": ["2-3 reasons they might need the user's product/service"],
+  "talking_points": ["2-3 specific conversation starters based on their business"]
+}}
+
+Be specific and actionable. Base insights on the business type and available data.
+Return ONLY valid JSON, no markdown or explanation."""
+
+
+@router.post("/leads/{lead_id}/research", response_model=LeadResearchResponse)
+@limiter.limit("10/minute")
+async def generate_lead_research(
+    request: Request,
+    lead_id: str,
+    auth_user: AuthUser = Depends(verify_supabase_token),
+) -> LeadResearchResponse:
+    """Generate LLM research brief for a lead.
+
+    Rate limited to 10 requests per minute per user.
+    Results are cached - subsequent requests return cached data.
+    """
+    db = _get_db_service()
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured",
+        )
+
+    # Get lead from database
+    lead = db.get_lead_by_id(lead_id)
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    # Verify ownership via job
+    job = db.get_job(lead["job_id"])
+    if not job or (job["user_id"] != auth_user.user_id and auth_user.user_id != "dev-user"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this lead",
+        )
+
+    # Check if research already exists (cached)
+    if lead.get("research"):
+        logger.info("lead_research_cache_hit", lead_id=lead_id)
+        return LeadResearchResponse(
+            lead_id=lead_id,
+            research=LeadResearch(**lead["research"]),
+            cached=True,
+        )
+
+    # Generate research using LLM
+    from src.generators.llm import LLMClient
+
+    # Get product context from job if available
+    product_context = job.get("product_context") or "Not specified"
+
+    prompt = RESEARCH_PROMPT.format(
+        name=lead.get("name", "Unknown"),
+        category=lead.get("category", "Unknown"),
+        address=lead.get("address", "Unknown"),
+        rating=lead.get("rating", "N/A"),
+        review_count=lead.get("review_count", 0),
+        website=lead.get("website", "Not available"),
+        product_context=product_context,
+    )
+
+    try:
+        llm = LLMClient()
+        response = llm.generate(prompt, max_tokens=500, temperature=0.7)
+
+        # Parse JSON response - handle potential markdown code blocks
+        response_text = response.strip()
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(
+                line for line in lines[1:-1] if not line.startswith("```")
+            )
+
+        research_data = json.loads(response_text)
+        research_data["generated_at"] = datetime.utcnow().isoformat()
+
+        # Cache result in database
+        db.update_lead_research(lead_id, research_data)
+
+        logger.info("lead_research_generated", lead_id=lead_id, user_id=auth_user.user_id)
+
+        return LeadResearchResponse(
+            lead_id=lead_id,
+            research=LeadResearch(**research_data),
+            cached=False,
+        )
+
+    except json.JSONDecodeError as e:
+        logger.error("lead_research_json_parse_failed", lead_id=lead_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to parse research response",
+        )
+    except Exception as e:
+        logger.error("lead_research_failed", lead_id=lead_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate research",
+        )
