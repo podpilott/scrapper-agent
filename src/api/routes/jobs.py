@@ -60,6 +60,12 @@ async def list_jobs(
                 progress=job.progress,
                 summary=job.summary,
                 error=job.error,
+                # Job config for retry
+                max_results=job.max_results,
+                min_score=job.min_score,
+                skip_enrichment=job.skip_enrichment,
+                skip_outreach=job.skip_outreach,
+                product_context=job.product_context,
             )
         )
 
@@ -94,6 +100,12 @@ async def list_jobs(
                         progress=progress,
                         summary=summary,
                         error=db_job.get("error"),
+                        # Job config for retry
+                        max_results=db_job.get("max_results"),
+                        min_score=db_job.get("min_score"),
+                        skip_enrichment=db_job.get("skip_enrichment"),
+                        skip_outreach=db_job.get("skip_outreach"),
+                        product_context=db_job.get("product_context"),
                     )
                 )
         except Exception:
@@ -264,6 +276,12 @@ async def get_job_status(
             progress=job.progress,
             summary=job.summary,
             error=job.error,
+            # Job config for retry
+            max_results=job.max_results,
+            min_score=job.min_score,
+            skip_enrichment=job.skip_enrichment,
+            skip_outreach=job.skip_outreach,
+            product_context=job.product_context,
         )
 
     # Fallback to database for historical jobs
@@ -298,6 +316,12 @@ async def get_job_status(
                     progress=progress,
                     summary=summary,
                     error=db_job.get("error"),
+                    # Job config for retry
+                    max_results=db_job.get("max_results"),
+                    min_score=db_job.get("min_score"),
+                    skip_enrichment=db_job.get("skip_enrichment"),
+                    skip_outreach=db_job.get("skip_outreach"),
+                    product_context=db_job.get("product_context"),
                 )
         except HTTPException:
             raise

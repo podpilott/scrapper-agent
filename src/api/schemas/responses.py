@@ -45,6 +45,12 @@ class JobStatusResponse(BaseModel):
     progress: JobProgress | None = None
     summary: JobSummary | None = None
     error: str | None = None
+    # Job configuration for retry functionality
+    max_results: int | None = None
+    min_score: int | None = None
+    skip_enrichment: bool | None = None
+    skip_outreach: bool | None = None
+    product_context: str | None = None
 
 
 class LeadResponse(BaseModel):
