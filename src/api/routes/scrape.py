@@ -10,6 +10,7 @@ from config.settings import settings
 from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
 from src.api.schemas.requests import ScrapeRequest
 from src.api.schemas.responses import JobCreatedResponse, JobSummary
+from src.api.services.database import db_service
 from src.api.services.job_manager import Job, job_manager
 from src.models.lead import FinalLead
 from src.pipeline.orchestrator import Pipeline, PipelineResult
@@ -121,6 +122,15 @@ async def start_scrape(
 
     Returns immediately with job_id. Connect to WebSocket for real-time updates.
     """
+    # Check if user is banned
+    if db_service.is_configured():
+        if db_service.is_user_banned(auth_user.user_id):
+            logger.warning("banned_user_scrape_attempt", user_id=auth_user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. Your account has been temporarily restricted due to excessive requests.",
+            )
+
     # Check concurrency limit (per-user and global)
     can_start, error_message = job_manager.can_start_job(user_id=auth_user.user_id)
     if not can_start:
