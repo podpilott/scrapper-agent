@@ -14,15 +14,42 @@ logger = get_logger("brave")
 
 
 class BraveSearch:
-    """Brave Search API client."""
+    """Brave Search API client with multi-key fallback support."""
 
     BASE_URL = "https://api.search.brave.com/res/v1/web/search"
+    # Error codes that trigger key rotation
+    ROTATABLE_STATUS_CODES = (401, 402, 429, 500, 502, 503)
 
     def __init__(self):
         """Initialize Brave Search client."""
-        if not settings.brave_api_key:
+        self.api_keys = settings.get_brave_keys()
+        if not self.api_keys:
             raise ValueError("BRAVE_API_KEY is required")
-        self.api_key = settings.brave_api_key.get_secret_value()
+        self.current_key_index = 0
+
+    def _get_current_key(self) -> str:
+        """Get the current API key."""
+        return self.api_keys[self.current_key_index]
+
+    def _rotate_key(self) -> bool:
+        """Try to rotate to the next API key.
+
+        Returns:
+            True if rotated to a new key, False if no more keys available.
+        """
+        if self.current_key_index < len(self.api_keys) - 1:
+            self.current_key_index += 1
+            logger.warning(
+                "rotating_brave_key",
+                new_index=self.current_key_index,
+                total_keys=len(self.api_keys),
+            )
+            return True
+        return False
+
+    def _should_rotate(self, status_code: int) -> bool:
+        """Check if the error status code should trigger key rotation."""
+        return status_code in self.ROTATABLE_STATUS_CODES
 
     async def search(
         self,
@@ -32,7 +59,7 @@ class BraveSearch:
         search_lang: str = "en",
         freshness: str | None = None,
     ) -> dict:
-        """Execute a Brave search.
+        """Execute a Brave search with automatic key rotation on failure.
 
         Args:
             query: Search query string.
@@ -65,47 +92,80 @@ class BraveSearch:
         if freshness:
             params["freshness"] = freshness
 
-        headers = {
-            "Accept": "application/json",
-            "X-Subscription-Token": self.api_key,
-        }
+        attempts = 0
+        max_attempts = len(self.api_keys)
+        last_error = None
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.get(
-                    self.BASE_URL,
-                    params=params,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                data = response.json()
+        while attempts < max_attempts:
+            headers = {
+                "Accept": "application/json",
+                "X-Subscription-Token": self._get_current_key(),
+            }
+            attempts += 1
 
-                # Normalize response format
-                results = []
-                web_results = data.get("web", {}).get("results", [])
-                for result in web_results:
-                    results.append({
-                        "title": result.get("title", ""),
-                        "url": result.get("url", ""),
-                        "content": result.get("description", ""),
-                        "score": 1.0,  # Brave doesn't provide relevance scores
-                    })
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    response = await client.get(
+                        self.BASE_URL,
+                        params=params,
+                        headers=headers,
+                    )
 
-                logger.debug(
-                    "brave_search_complete",
-                    query=query,
-                    results_count=len(results),
-                )
+                    # Check for rotatable errors before raising
+                    if response.status_code >= 400:
+                        if self._should_rotate(response.status_code):
+                            logger.warning(
+                                "brave_key_error",
+                                status=response.status_code,
+                                key_index=self.current_key_index,
+                            )
+                            if self._rotate_key():
+                                continue
+                        # No more keys or non-rotatable error
+                        response.raise_for_status()
 
-                return {
-                    "query": query,
-                    "results": results,
-                    "answer": None,  # Brave doesn't provide AI answers
-                }
+                    data = response.json()
 
-            except httpx.HTTPError as e:
-                logger.error("brave_search_failed", query=query, error=str(e))
-                raise
+                    # Normalize response format
+                    results = []
+                    web_results = data.get("web", {}).get("results", [])
+                    for result in web_results:
+                        results.append({
+                            "title": result.get("title", ""),
+                            "url": result.get("url", ""),
+                            "content": result.get("description", ""),
+                            "score": 1.0,  # Brave doesn't provide relevance scores
+                        })
+
+                    logger.debug(
+                        "brave_search_complete",
+                        query=query,
+                        results_count=len(results),
+                    )
+
+                    return {
+                        "query": query,
+                        "results": results,
+                        "answer": None,  # Brave doesn't provide AI answers
+                    }
+
+                except httpx.HTTPError as e:
+                    last_error = e
+                    status = getattr(getattr(e, 'response', None), 'status_code', 500)
+                    logger.warning(
+                        "brave_request_error",
+                        error=str(e),
+                        status=status,
+                        key_index=self.current_key_index,
+                    )
+                    if self._should_rotate(status) and self._rotate_key():
+                        continue
+                    raise
+
+        logger.error("all_brave_keys_exhausted", total_keys=len(self.api_keys))
+        if last_error:
+            raise last_error
+        raise RuntimeError("All Brave API keys exhausted")
 
     async def search_company(self, company_name: str, location: str | None = None) -> dict:
         """Search for company information.
