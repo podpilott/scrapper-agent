@@ -213,15 +213,15 @@ class JobManager:
                 except Exception as e:
                     logger.error("db_update_progress_error", job_id=job_id, error=str(e))
 
-    def add_lead(self, job_id: str, lead: FinalLead) -> bool:
+    def add_lead(self, job_id: str, lead: FinalLead) -> tuple[bool, str | None]:
         """Add a lead to job results with cross-job deduplication.
 
         Returns:
-            True if lead was added, False if duplicate.
+            Tuple of (was_added, existing_job_id). If duplicate, returns (False, job_id).
         """
         job = self._jobs.get(job_id)
         if not job:
-            return False
+            return False, None
 
         lead_dict = lead.to_flat_dict()
 
@@ -234,12 +234,13 @@ class JobManager:
                     phone=lead_dict.get("phone"),
                 )
                 if existing:
+                    existing_job_id = existing.get("job_id")
                     logger.info(
                         "duplicate_lead_skipped",
                         name=lead.name,
-                        existing_job=existing.get("job_id"),
+                        existing_job=existing_job_id,
                     )
-                    return False
+                    return False, existing_job_id
             except Exception as e:
                 logger.warning("dedup_check_failed", error=str(e))
                 # Continue anyway if dedup check fails
@@ -265,7 +266,7 @@ class JobManager:
             except Exception as e:
                 logger.error("db_add_lead_error", job_id=job_id, error=str(e))
 
-        return True
+        return True, None
 
     def update_lead(self, job_id: str, place_id: str, lead: FinalLead) -> bool:
         """Update an existing lead with enriched data.

@@ -15,6 +15,13 @@ class JobProgress(BaseModel):
     message: str | None = Field(None, description="Human-readable progress message")
 
 
+class DuplicateInfo(BaseModel):
+    """Information about a duplicate lead."""
+
+    name: str
+    job_id: str
+
+
 class JobSummary(BaseModel):
     """Summary of completed job results."""
 
@@ -23,6 +30,10 @@ class JobSummary(BaseModel):
     warm: int = 0
     cold: int = 0
     duration_seconds: float | None = None
+    # Deduplication info
+    total_scraped: int = 0  # Total leads found from Google Maps
+    duplicates_skipped: int = 0  # Number of leads skipped due to deduplication
+    duplicate_jobs: list[str] = []  # Job IDs that contain the duplicates
 
 
 class JobCreatedResponse(BaseModel):

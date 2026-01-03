@@ -42,6 +42,10 @@ class PipelineResult:
     started_at: datetime = field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
 
+    # Deduplication info (set by scrape route)
+    duplicates_skipped: int = 0
+    duplicate_jobs: list[str] = field(default_factory=list)
+
     @property
     def duration_seconds(self) -> float | None:
         if self.completed_at:

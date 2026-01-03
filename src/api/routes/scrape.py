@@ -37,6 +37,10 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
 
     # Track which place_ids were actually saved (not duplicates)
     saved_place_ids: set[str] = set()
+    # Track deduplication info for summary
+    duplicate_job_ids: set[str] = set()
+    duplicates_count: int = 0
+    total_scraped: int = 0
 
     def progress_callback(step: str, current: int, total: int) -> None:
         if job_manager.is_cancelled(job_id):
@@ -46,9 +50,14 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
 
     def lead_callback(lead: FinalLead) -> bool:
         """Add lead and return True if saved, False if duplicate."""
-        was_added = job_manager.add_lead(job_id, lead)
+        nonlocal duplicates_count
+        was_added, existing_job_id = job_manager.add_lead(job_id, lead)
         if was_added:
             saved_place_ids.add(lead.scored_lead.lead.raw.place_id)
+        else:
+            duplicates_count += 1
+            if existing_job_id:
+                duplicate_job_ids.add(existing_job_id)
         return was_added
 
     def lead_update_callback(lead: FinalLead) -> None:
@@ -56,6 +65,11 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
         # Only update leads that were actually saved (not duplicates)
         if place_id in saved_place_ids:
             job_manager.update_lead(job_id, place_id, lead)
+
+    def on_scrape_complete(count: int) -> None:
+        """Called when scraping is complete to track total scraped."""
+        nonlocal total_scraped
+        total_scraped = count
 
     pipeline = Pipeline(
         max_results=job.max_results,
@@ -70,7 +84,14 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
     )
 
     # Run async pipeline in new event loop (since we're in a thread)
-    return asyncio.run(pipeline.run(job.query))
+    result = asyncio.run(pipeline.run(job.query))
+
+    # Attach deduplication info to result for summary building
+    result.total_scraped = result.total_scraped or total_scraped
+    result.duplicates_skipped = duplicates_count
+    result.duplicate_jobs = list(duplicate_job_ids)
+
+    return result
 
 
 async def run_scrape_job(job: Job) -> None:
@@ -106,6 +127,10 @@ async def run_scrape_job(job: Job) -> None:
             warm=tiers["warm"],
             cold=tiers["cold"],
             duration_seconds=result.duration_seconds,
+            # Deduplication info
+            total_scraped=result.total_scraped,
+            duplicates_skipped=result.duplicates_skipped,
+            duplicate_jobs=result.duplicate_jobs,
         )
 
         job_manager.complete_job(job_id, summary)
