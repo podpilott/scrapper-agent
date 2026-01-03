@@ -1,0 +1,26 @@
+# 🚀 Kubeletto Auto-Deploy Workflow
+# This file was automatically created by Kubeletto Platform.
+#
+# It uses a reusable workflow from Kubeletto to build and deploy your app.
+# You can customize the trigger or variables below.
+
+name: Deploy to Kubeletto
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    uses: Pod-Pilot/kubeletto-actions/.github/workflows/reusable-deploy.yml@v1
+    with:
+      project_id: ${{ vars.KUBELETTO_PROJECT_ID }}
+      api_url: https://api-staging.kubeletto.com
+    secrets:
+      api_key: ${{ secrets.KUBELETTO_API_KEY }}
