@@ -26,17 +26,15 @@ def setup_logging() -> None:
     """
     log_level = LOG_LEVEL_MAP.get(settings.log_level, logging.INFO)
 
-    # Configure standard library logging
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stderr,
-        level=log_level,
-    )
+    # Determine renderer based on format
+    if settings.log_format == "json":
+        renderer = structlog.processors.JSONRenderer()
+    else:
+        renderer = structlog.dev.ConsoleRenderer(colors=True)
 
-    # Shared processors for all formats
-    shared_processors: list[structlog.types.Processor] = [
+    # Processors that prepare event dict for stdlib
+    structlog_processors = [
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.filter_by_level,  # Filter based on log level
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.PositionalArgumentsFormatter(),
@@ -44,33 +42,45 @@ def setup_logging() -> None:
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
     ]
 
-    if settings.log_format == "json":
-        # Production: JSON output for log aggregation (ELK, CloudWatch, etc.)
-        processors = shared_processors + [
-            structlog.processors.JSONRenderer()
-        ]
-        logger_factory = structlog.PrintLoggerFactory(file=sys.stderr)
-    else:
-        # Development: Colored console output
-        processors = shared_processors + [
-            structlog.dev.ConsoleRenderer(colors=True)
-        ]
-        logger_factory = structlog.PrintLoggerFactory(file=sys.stderr)
-
+    # Configure structlog to use stdlib
     structlog.configure(
-        processors=processors,
+        processors=structlog_processors,
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=logger_factory,
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
-    # Set log level for common noisy libraries
+    # Create formatter with our renderer
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=[
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.format_exc_info,
+        ],
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+    )
+
+    # Configure root logger
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(log_level)
+
+    # Silence noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
@@ -82,10 +92,9 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     Returns:
         Configured logger instance.
     """
-    logger = structlog.get_logger()
     if name:
-        logger = logger.bind(logger=name)
-    return logger
+        return structlog.get_logger(name)
+    return structlog.get_logger()
 
 
 # Auto-initialize logging on import
