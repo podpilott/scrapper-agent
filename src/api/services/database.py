@@ -507,7 +507,7 @@ class DatabaseService:
         """Check violation count and auto-ban if threshold exceeded.
 
         Progressive thresholds:
-        - 20+ violations in 24h: 1 hour ban
+        - 15+ violations in 24h: 1 hour ban
         - 50+ violations in 24h: 6 hour ban
         - 100+ violations in 24h: 24 hour ban
         - 200+ violations in 24h: 7 day ban
@@ -535,9 +535,9 @@ class DatabaseService:
             elif count_24h >= 50:
                 ban_hours = 6  # 6 hours
                 reason = "Moderate rate limit abuse (50+ violations in 24h)"
-            elif count_24h >= 20:
+            elif count_24h >= 15:
                 ban_hours = 1  # 1 hour
-                reason = "Rate limit abuse (20+ violations in 24h)"
+                reason = "Rate limit abuse (15+ violations in 24h)"
             else:
                 return False  # Below threshold
 
