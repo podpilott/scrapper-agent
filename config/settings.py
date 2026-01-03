@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000)
     cors_origins: list[str] = Field(default=["http://localhost:3000"])
 
+    # Logging Settings
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
+    log_format: Literal["console", "json"] = Field(default="console")
+
     # Job Settings
     max_concurrent_jobs: int = Field(default=10)
     max_jobs_per_user: int = Field(default=1)
