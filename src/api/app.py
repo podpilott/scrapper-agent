@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
-from src.api.routes import demo, health, jobs, scrape
+from src.api.routes import demo, health, jobs, query, scrape
 from src.api.services.job_manager import job_manager
 from src.api.websocket.handler import router as websocket_router
 from src.utils.logger import get_logger
@@ -54,6 +54,7 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(demo.router, prefix="/api", tags=["demo"])
+    app.include_router(query.router, prefix="/api", tags=["query"])
     app.include_router(scrape.router, prefix="/api", tags=["scrape"])
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
     app.include_router(websocket_router, tags=["websocket"])
