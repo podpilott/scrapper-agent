@@ -9,6 +9,7 @@ from slowapi import Limiter
 import jwt
 
 from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
+from src.api.schemas.responses import DuplicateCheckResponse, SimilarJob
 from src.api.services.database import db_service, format_ban_remaining
 from src.generators.llm import LLMClient
 from src.utils.logger import get_logger
@@ -185,3 +186,149 @@ async def enhance_query(
             query_type="good",
             is_problematic=False,
         )
+
+
+# ============== Duplicate Query Check Endpoint ==============
+
+QUERY_SUGGESTION_PROMPT = """Given a Google Maps search query that the user has already searched before,
+suggest 3 alternative queries that would find DIFFERENT businesses.
+
+Original query: "{query}"
+Previously searched: {existing_queries}
+
+Rules:
+1. Suggest related but different business categories
+2. Suggest nearby locations or expanded areas
+3. Suggest more specific niches within the category
+4. Each suggestion should be a complete, searchable query
+5. Keep suggestions practical and useful for lead generation
+
+Return ONLY a JSON array of 3 strings, no explanation.
+Example: ["suggestion 1", "suggestion 2", "suggestion 3"]"""
+
+
+def _generate_fallback_suggestions(query: str) -> list[str]:
+    """Generate basic suggestions without LLM."""
+    parts = query.lower().split(" in ")
+    if len(parts) == 2:
+        category, location = parts
+        return [
+            f"{category} near {location}",
+            f"best {category} in {location}",
+            f"{category} services in {location}",
+        ]
+    return []
+
+
+def _generate_query_suggestions(query: str, similar_jobs: list[dict]) -> list[str]:
+    """Use LLM to generate alternative query suggestions."""
+    existing_queries = [j["query"] for j in similar_jobs]
+
+    prompt = QUERY_SUGGESTION_PROMPT.format(
+        query=query,
+        existing_queries=existing_queries,
+    )
+
+    try:
+        llm = LLMClient()
+        response = llm.generate(prompt, max_tokens=200, temperature=0.7)
+
+        # Parse JSON response - handle potential markdown code blocks
+        response_text = response.strip()
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(
+                line for line in lines[1:-1] if not line.startswith("```")
+            )
+
+        suggestions = json.loads(response_text)
+        if isinstance(suggestions, list):
+            return [s for s in suggestions if isinstance(s, str)][:3]
+    except Exception as e:
+        logger.warning("query_suggestion_failed", error=str(e))
+
+    # Fallback: generate basic suggestions
+    return _generate_fallback_suggestions(query)
+
+
+@router.post("/query/check-duplicate", response_model=DuplicateCheckResponse)
+@limiter.limit("20/minute")
+async def check_duplicate_query(
+    request: Request,
+    body: QueryEnhanceRequest,
+    auth_user: AuthUser = Depends(verify_supabase_token),
+) -> DuplicateCheckResponse:
+    """Check if query has similar jobs and suggest alternatives.
+
+    Requires authentication. Rate limited to 20 requests per minute per user.
+    """
+    # Store user_id in request state for rate limiter
+    request.state.user_id = auth_user.user_id
+
+    # Check if user is banned
+    if db_service.is_configured():
+        ban_info = db_service.get_user_ban_info(auth_user.user_id)
+        if ban_info:
+            remaining = format_ban_remaining(ban_info.get("expires_at"))
+            logger.warning("banned_user_dup_check_attempt", user_id=auth_user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. Your account has been restricted. Try again in {remaining}.",
+            )
+
+    # Sanitize input
+    query = sanitize_query(body.query)
+
+    if not query or len(query) < 2:
+        return DuplicateCheckResponse(
+            has_duplicates=False,
+            similar_jobs=[],
+            suggestions=[],
+        )
+
+    # Find similar jobs in database
+    similar_jobs_data = []
+    if db_service.is_configured():
+        try:
+            similar_jobs_data = db_service.find_similar_jobs(
+                user_id=auth_user.user_id,
+                query=query,
+                limit=5,
+            )
+        except Exception as e:
+            logger.warning("find_similar_jobs_error", error=str(e))
+
+    if not similar_jobs_data:
+        return DuplicateCheckResponse(
+            has_duplicates=False,
+            similar_jobs=[],
+            suggestions=[],
+        )
+
+    # Convert to response models
+    similar_jobs = [SimilarJob(**j) for j in similar_jobs_data]
+
+    # Generate LLM suggestions for alternative queries
+    suggestions = _generate_query_suggestions(query, similar_jobs_data)
+
+    # Build message
+    exact_match = any(j.match_type == "exact" for j in similar_jobs)
+    if exact_match:
+        message = "You've already searched for this exact query."
+    else:
+        message = "You have similar searches in your history."
+
+    logger.info(
+        "duplicate_query_check",
+        user_id=auth_user.user_id,
+        query=query,
+        similar_count=len(similar_jobs),
+        has_exact=exact_match,
+    )
+
+    return DuplicateCheckResponse(
+        has_duplicates=True,
+        similar_jobs=similar_jobs,
+        suggestions=suggestions,
+        message=message,
+    )

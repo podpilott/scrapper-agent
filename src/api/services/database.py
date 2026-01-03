@@ -420,6 +420,90 @@ class DatabaseService:
         )
         return result.data or []
 
+    # ============== Query Duplicate Check Operations ==============
+
+    def find_similar_jobs(
+        self,
+        user_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Find similar completed jobs for a user.
+
+        Matching strategy:
+        1. Exact match (case-insensitive)
+        2. Contains match (query contains or is contained by existing)
+        3. Word overlap (shared significant words)
+
+        Args:
+            user_id: User ID to search for.
+            query: Query string to find similar jobs for.
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of job dicts with: job_id, query, total_leads, created_at, match_type
+        """
+        try:
+            # Get user's completed jobs from last 30 days
+            cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
+
+            result = (
+                self.client.table("jobs")
+                .select("job_id, query, created_at, summary")
+                .eq("user_id", user_id)
+                .eq("status", "completed")
+                .gte("created_at", cutoff)
+                .order("created_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+
+            jobs = result.data or []
+            query_lower = query.lower().strip()
+            query_words = set(query_lower.split())
+
+            matches = []
+            for job in jobs:
+                job_query = job["query"].lower().strip()
+                job_words = set(job_query.split())
+
+                # Calculate similarity
+                score = 0
+                match_type = None
+
+                if query_lower == job_query:
+                    score = 100
+                    match_type = "exact"
+                elif query_lower in job_query or job_query in query_lower:
+                    score = 80
+                    match_type = "contains"
+                else:
+                    # Word overlap
+                    overlap = len(query_words & job_words)
+                    total = len(query_words | job_words)
+                    if total > 0 and overlap / total > 0.5:
+                        score = int(overlap / total * 60)
+                        match_type = "similar"
+
+                if score > 40:
+                    summary = job.get("summary") or {}
+                    matches.append({
+                        "job_id": job["job_id"],
+                        "query": job["query"],
+                        "total_leads": summary.get("total_leads", 0),
+                        "created_at": job["created_at"],
+                        "match_type": match_type,
+                        "score": score,
+                    })
+
+            # Sort by score (desc), then by date (desc)
+            matches.sort(key=lambda x: (-x["score"], x["created_at"]), reverse=False)
+            return matches[:limit]
+
+        except Exception as e:
+            logger.warning("find_similar_jobs_failed", user_id=user_id, error=str(e))
+            return []
+
     # ============== Demo Operations ==============
 
     def get_demo_leads(self) -> list[dict[str, Any]]:

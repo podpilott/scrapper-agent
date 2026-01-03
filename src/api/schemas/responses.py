@@ -105,3 +105,22 @@ class WebSocketMessage(BaseModel):
     type: Literal["status", "lead", "error", "complete"]
     data: dict[str, Any] | None = None
     message: str | None = None
+
+
+class SimilarJob(BaseModel):
+    """A similar job from user's history."""
+
+    job_id: str
+    query: str
+    total_leads: int = 0
+    created_at: str
+    match_type: Literal["exact", "contains", "similar"]
+
+
+class DuplicateCheckResponse(BaseModel):
+    """Response for duplicate query check."""
+
+    has_duplicates: bool = False
+    similar_jobs: list[SimilarJob] = []
+    suggestions: list[str] = []  # LLM-generated alternative queries
+    message: str | None = None
