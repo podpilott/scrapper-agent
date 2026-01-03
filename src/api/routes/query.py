@@ -93,7 +93,7 @@ Return ONLY valid JSON, no other text.
 
 
 @router.post("/query/enhance", response_model=QueryEnhanceResponse)
-@limiter.limit("15/minute")
+@limiter.limit("20/minute")
 async def enhance_query(
     request: Request,
     body: QueryEnhanceRequest,
