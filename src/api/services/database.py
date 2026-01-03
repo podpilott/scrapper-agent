@@ -5,6 +5,41 @@ from typing import Any
 
 from supabase import Client, create_client
 
+
+def format_ban_remaining(expires_at_str: str | None) -> str:
+    """Format remaining ban time in a human-readable way.
+
+    Args:
+        expires_at_str: ISO format expiry timestamp.
+
+    Returns:
+        Human-readable string like "45 minutes", "3 hours", "2 days".
+    """
+    if not expires_at_str:
+        return "indefinitely"
+
+    try:
+        expiry = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+        remaining = expiry - datetime.now(timezone.utc)
+
+        if remaining.total_seconds() <= 0:
+            return "soon"
+
+        total_minutes = int(remaining.total_seconds() / 60)
+        total_hours = int(remaining.total_seconds() / 3600)
+        total_days = int(remaining.total_seconds() / 86400)
+
+        if total_days >= 1:
+            return f"{total_days} day{'s' if total_days != 1 else ''}"
+        elif total_hours >= 1:
+            return f"{total_hours} hour{'s' if total_hours != 1 else ''}"
+        elif total_minutes >= 1:
+            return f"{total_minutes} minute{'s' if total_minutes != 1 else ''}"
+        else:
+            return "less than a minute"
+    except Exception:
+        return "some time"
+
 from config.settings import settings
 from src.api.schemas.responses import JobSummary
 from src.utils.logger import get_logger
@@ -330,6 +365,18 @@ class DatabaseService:
         Returns:
             True if user is banned and ban is active, False otherwise.
         """
+        ban_info = self.get_user_ban_info(user_id)
+        return ban_info is not None
+
+    def get_user_ban_info(self, user_id: str) -> dict[str, Any] | None:
+        """Get ban information for a user.
+
+        Args:
+            user_id: The user ID to check.
+
+        Returns:
+            Ban info dict with 'reason', 'expires_at' if banned, None otherwise.
+        """
         try:
             result = (
                 self.client.table("banned_users")
@@ -340,25 +387,27 @@ class DatabaseService:
                 .execute()
             )
             if not result.data:
-                return False
+                return None
 
             # Check if ban has expired
             ban = result.data[0]
             expires_at = ban.get("expires_at")
             if expires_at:
-                from datetime import datetime
                 expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-                if datetime.now(expiry.tzinfo) > expiry:
+                if datetime.now(timezone.utc) > expiry:
                     # Ban expired, deactivate it
                     self.client.table("banned_users").update(
                         {"is_active": False}
                     ).eq("id", ban["id"]).execute()
-                    return False
+                    return None
 
-            return True
+            return {
+                "reason": ban.get("reason"),
+                "expires_at": expires_at,
+            }
         except Exception as e:
             logger.warning("ban_check_failed", user_id=user_id, error=str(e))
-            return False  # Fail open - don't block on error
+            return None  # Fail open - don't block on error
 
     def ban_user(
         self,

@@ -9,7 +9,7 @@ from slowapi import Limiter
 import jwt
 
 from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
-from src.api.services.database import db_service
+from src.api.services.database import db_service, format_ban_remaining
 from src.generators.llm import LLMClient
 from src.utils.logger import get_logger
 
@@ -108,11 +108,13 @@ async def enhance_query(
 
     # Check if user is banned
     if db_service.is_configured():
-        if db_service.is_user_banned(auth_user.user_id):
+        ban_info = db_service.get_user_ban_info(auth_user.user_id)
+        if ban_info:
+            remaining = format_ban_remaining(ban_info.get("expires_at"))
             logger.warning("banned_user_attempt", user_id=auth_user.user_id)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied. Your account has been restricted.",
+                detail=f"Access denied. Your account has been restricted. Try again in {remaining}.",
             )
 
     # Sanitize input
