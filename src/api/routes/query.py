@@ -6,6 +6,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from slowapi import Limiter
+import jwt
 
 from src.api.middleware.supabase_auth import AuthUser, verify_supabase_token
 from src.api.services.database import db_service
@@ -17,10 +18,24 @@ logger = get_logger("query_route")
 
 
 def get_user_id_for_limit(request: Request) -> str:
-    """Extract user_id from request state for rate limiting."""
-    # This is set by verify_supabase_token dependency
-    if hasattr(request.state, "user_id"):
-        return f"user:{request.state.user_id}"
+    """Extract user_id from JWT token for rate limiting.
+
+    This runs BEFORE the endpoint function, so we need to decode the JWT manually.
+    """
+    try:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            # Decode without verification - just to get the user_id for rate limiting
+            # The actual verification happens in verify_supabase_token
+            payload = jwt.decode(token, options={"verify_signature": False})
+            user_id = payload.get("sub")
+            if user_id:
+                # Store in request state for the custom 429 handler
+                request.state.user_id = user_id
+                return f"user:{user_id}"
+    except Exception:
+        pass
     return "unknown"
 
 
