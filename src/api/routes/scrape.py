@@ -35,18 +35,27 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
     """
     job_id = job.job_id
 
+    # Track which place_ids were actually saved (not duplicates)
+    saved_place_ids: set[str] = set()
+
     def progress_callback(step: str, current: int, total: int) -> None:
         if job_manager.is_cancelled(job_id):
             raise Exception("Job cancelled")
         message = _get_step_message(step, current, total)
         job_manager.update_progress(job_id, step, current, total, message)
 
-    def lead_callback(lead: FinalLead) -> None:
-        job_manager.add_lead(job_id, lead)
+    def lead_callback(lead: FinalLead) -> bool:
+        """Add lead and return True if saved, False if duplicate."""
+        was_added = job_manager.add_lead(job_id, lead)
+        if was_added:
+            saved_place_ids.add(lead.scored_lead.lead.raw.place_id)
+        return was_added
 
     def lead_update_callback(lead: FinalLead) -> None:
         place_id = lead.scored_lead.lead.raw.place_id
-        job_manager.update_lead(job_id, place_id, lead)
+        # Only update leads that were actually saved (not duplicates)
+        if place_id in saved_place_ids:
+            job_manager.update_lead(job_id, place_id, lead)
 
     pipeline = Pipeline(
         max_results=job.max_results,
@@ -57,6 +66,7 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
         progress_callback=progress_callback,
         lead_callback=lead_callback,
         lead_update_callback=lead_update_callback,
+        saved_place_ids=saved_place_ids,  # Pass to pipeline to skip duplicates
     )
 
     # Run async pipeline in new event loop (since we're in a thread)
@@ -81,13 +91,17 @@ async def run_scrape_job(job: Job) -> None:
             _executor, _run_pipeline_sync, job
         )
 
-        # Build summary
+        # Build summary from SAVED leads (not processed leads, due to deduplication)
+        # Get the actual saved leads from job manager
+        saved_job = job_manager.get_job(job_id)
+        saved_leads = saved_job.leads if saved_job else []
+
         tiers = {"hot": 0, "warm": 0, "cold": 0}
-        for lead in result.leads:
+        for lead in saved_leads:
             tiers[lead.tier] = tiers.get(lead.tier, 0) + 1
 
         summary = JobSummary(
-            total_leads=len(result.leads),
+            total_leads=len(saved_leads),
             hot=tiers["hot"],
             warm=tiers["warm"],
             cold=tiers["cold"],

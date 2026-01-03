@@ -60,8 +60,9 @@ class Pipeline:
         skip_outreach: bool = False,
         product_context: str | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
-        lead_callback: Callable[["FinalLead"], None] | None = None,
+        lead_callback: Callable[["FinalLead"], bool] | None = None,
         lead_update_callback: Callable[["FinalLead"], None] | None = None,
+        saved_place_ids: set[str] | None = None,
     ):
         """Initialize the pipeline.
 
@@ -72,8 +73,9 @@ class Pipeline:
             skip_outreach: Skip outreach message generation.
             product_context: Your product/service description for outreach.
             progress_callback: Callback for progress updates (step, current, total).
-            lead_callback: Callback for each new lead (for streaming/saving).
+            lead_callback: Callback for each new lead (for streaming/saving). Returns bool.
             lead_update_callback: Callback when a lead is updated with enriched data.
+            saved_place_ids: Set of place_ids that were actually saved (for skipping duplicates).
         """
         self.max_results = max_results if max_results is not None else settings.max_results_per_query
         self.min_score = min_score if min_score is not None else settings.min_score_for_outreach
@@ -83,6 +85,7 @@ class Pipeline:
         self.progress_callback = progress_callback
         self.lead_callback = lead_callback
         self.lead_update_callback = lead_update_callback
+        self.saved_place_ids = saved_place_ids
 
         # Initialize components - SerpAPI scraper
         if not settings.serpapi_key:
@@ -142,22 +145,36 @@ class Pipeline:
 
             # PROGRESSIVE SAVE: Save leads immediately after scraping with minimal scoring
             # This ensures leads are persisted even if server restarts during enrichment
+            # Also tracks which leads were actually saved vs deduplicated
+            saved_raw_leads = []
             for raw_lead in raw_leads:
                 minimal_enriched = self._minimal_enrichment(raw_lead)
                 # Quick score with minimal data
                 scored = self.scorer.score_batch([minimal_enriched])[0]
                 final_lead = FinalLead(scored_lead=scored)
                 leads_by_place_id[raw_lead.place_id] = final_lead
-                # Save immediately via callback
+                # Save immediately via callback - returns True if saved, False if duplicate
                 if self.lead_callback:
-                    self.lead_callback(final_lead)
+                    was_saved = self.lead_callback(final_lead)
+                    if was_saved:
+                        saved_raw_leads.append(raw_lead)
+                else:
+                    saved_raw_leads.append(raw_lead)
 
-            # Step 2: Enrich leads
+            # Only process leads that were actually saved (not duplicates)
+            # This avoids wasting resources on enriching/outreaching duplicate leads
+            leads_to_process = saved_raw_leads if self.saved_place_ids is not None else raw_leads
+
+            if not leads_to_process:
+                logger.info("all_leads_deduplicated")
+                return result
+
+            # Step 2: Enrich leads (only non-duplicates)
             if not self.skip_enrichment:
                 logger.info("step_2_enriching")
-                enriched_leads = await self._enrich_leads(raw_leads)
+                enriched_leads = await self._enrich_leads(leads_to_process)
             else:
-                enriched_leads = [self._minimal_enrichment(lead) for lead in raw_leads]
+                enriched_leads = [self._minimal_enrichment(lead) for lead in leads_to_process]
 
             result.total_enriched = len(enriched_leads)
 
