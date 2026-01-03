@@ -25,6 +25,8 @@ class SerpAPIMapsScraper:
     BASE_URL = "https://serpapi.com/search"
     # Parallel requests for place details (balance speed vs rate limits)
     MAX_CONCURRENT_DETAILS = 5
+    # Error codes that trigger key rotation
+    ROTATABLE_STATUS_CODES = (401, 402, 429, 500, 502, 503)
 
     def __init__(self, max_results: int | None = None, fetch_details: bool = True):
         """Initialize the SerpAPI scraper.
@@ -35,9 +37,102 @@ class SerpAPIMapsScraper:
         """
         self.max_results = max_results or settings.max_results_per_query
         self.fetch_details = fetch_details
-        if not settings.serpapi_key:
+        self.api_keys = settings.get_serpapi_keys()
+        if not self.api_keys:
             raise ValueError("SERPAPI_KEY is required when use_serpapi=true")
-        self.api_key = settings.serpapi_key.get_secret_value()
+        self.current_key_index = 0
+
+    def _get_current_key(self) -> str:
+        """Get the current API key."""
+        return self.api_keys[self.current_key_index]
+
+    def _rotate_key(self) -> bool:
+        """Try to rotate to the next API key.
+
+        Returns:
+            True if rotated to a new key, False if no more keys available.
+        """
+        if self.current_key_index < len(self.api_keys) - 1:
+            self.current_key_index += 1
+            logger.warning(
+                "rotating_serpapi_key",
+                new_index=self.current_key_index,
+                total_keys=len(self.api_keys),
+            )
+            return True
+        return False
+
+    def _should_rotate(self, status_code: int) -> bool:
+        """Check if the error status code should trigger key rotation."""
+        return status_code in self.ROTATABLE_STATUS_CODES
+
+    async def _request_with_fallback(
+        self, client: httpx.AsyncClient, params: dict
+    ) -> dict | None:
+        """Make a request with automatic key rotation on failure.
+
+        Args:
+            client: HTTP client.
+            params: Request parameters (api_key will be set automatically).
+
+        Returns:
+            Response JSON or None if all keys failed.
+        """
+        attempts = 0
+        max_attempts = len(self.api_keys)
+
+        while attempts < max_attempts:
+            params["api_key"] = self._get_current_key()
+            attempts += 1
+
+            try:
+                response = await client.get(self.BASE_URL, params=params)
+
+                # Check for rotatable errors before raising
+                if response.status_code >= 400:
+                    if self._should_rotate(response.status_code):
+                        logger.warning(
+                            "serpapi_key_error",
+                            status=response.status_code,
+                            key_index=self.current_key_index,
+                        )
+                        if self._rotate_key():
+                            continue
+                    # No more keys or non-rotatable error
+                    response.raise_for_status()
+
+                data = response.json()
+
+                # SerpAPI sometimes returns error in body with 200 status
+                if "error" in data:
+                    error_msg = data["error"]
+                    # Check if it's a quota/auth error
+                    if any(x in error_msg.lower() for x in ["invalid", "quota", "limit", "key"]):
+                        logger.warning(
+                            "serpapi_key_error_in_body",
+                            error=error_msg,
+                            key_index=self.current_key_index,
+                        )
+                        if self._rotate_key():
+                            continue
+                    return None
+
+                return data
+
+            except httpx.HTTPError as e:
+                status = getattr(getattr(e, 'response', None), 'status_code', 500)
+                logger.warning(
+                    "serpapi_request_error",
+                    error=str(e),
+                    status=status,
+                    key_index=self.current_key_index,
+                )
+                if self._should_rotate(status) and self._rotate_key():
+                    continue
+                raise
+
+        logger.error("all_serpapi_keys_exhausted", total_keys=len(self.api_keys))
+        return None
 
     async def scrape(self, query: str) -> list[RawLead]:
         """Scrape Google Maps via SerpAPI.
@@ -65,20 +160,11 @@ class SerpAPIMapsScraper:
                     "engine": "google_maps",
                     "q": query,
                     "type": "search",
-                    "api_key": self.api_key,
                     "start": start,
                 }
 
-                try:
-                    response = await client.get(self.BASE_URL, params=params)
-                    response.raise_for_status()
-                    data = response.json()
-                except httpx.HTTPError as e:
-                    logger.error("serpapi_request_failed", error=str(e))
-                    break
-
-                if "error" in data:
-                    logger.error("serpapi_error", error=data["error"])
+                data = await self._request_with_fallback(client, params)
+                if data is None:
                     break
 
                 local_results = data.get("local_results", [])
@@ -161,16 +247,11 @@ class SerpAPIMapsScraper:
         params = {
             "engine": "google_maps_place_details",
             "data_id": data_id,
-            "api_key": self.api_key,
         }
 
         try:
-            response = await client.get(self.BASE_URL, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            if "error" in data:
-                logger.debug("place_details_error", data_id=data_id, error=data["error"])
+            data = await self._request_with_fallback(client, params)
+            if data is None:
                 return None
 
             # Place details returns data at top level or in place_results

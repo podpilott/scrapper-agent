@@ -15,15 +15,42 @@ logger = get_logger("tavily")
 
 
 class TavilySearch:
-    """Tavily Search API client."""
+    """Tavily Search API client with multi-key fallback support."""
 
     BASE_URL = "https://api.tavily.com/search"
+    # Error codes that trigger key rotation
+    ROTATABLE_STATUS_CODES = (401, 402, 429, 500, 502, 503)
 
     def __init__(self):
         """Initialize Tavily client."""
-        if not settings.tavily_api_key:
+        self.api_keys = settings.get_tavily_keys()
+        if not self.api_keys:
             raise ValueError("TAVILY_API_KEY is required")
-        self.api_key = settings.tavily_api_key.get_secret_value()
+        self.current_key_index = 0
+
+    def _get_current_key(self) -> str:
+        """Get the current API key."""
+        return self.api_keys[self.current_key_index]
+
+    def _rotate_key(self) -> bool:
+        """Try to rotate to the next API key.
+
+        Returns:
+            True if rotated to a new key, False if no more keys available.
+        """
+        if self.current_key_index < len(self.api_keys) - 1:
+            self.current_key_index += 1
+            logger.warning(
+                "rotating_tavily_key",
+                new_index=self.current_key_index,
+                total_keys=len(self.api_keys),
+            )
+            return True
+        return False
+
+    def _should_rotate(self, status_code: int) -> bool:
+        """Check if the error status code should trigger key rotation."""
+        return status_code in self.ROTATABLE_STATUS_CODES
 
     async def search(
         self,
@@ -33,7 +60,7 @@ class TavilySearch:
         include_answer: bool = True,
         include_raw_content: bool = False,
     ) -> dict:
-        """Execute a Tavily search.
+        """Execute a Tavily search with automatic key rotation on failure.
 
         Args:
             query: Search query string.
@@ -57,32 +84,65 @@ class TavilySearch:
                 ]
             }
         """
-        payload = {
-            "api_key": self.api_key,
-            "query": query,
-            "search_depth": search_depth,
-            "max_results": max_results,
-            "include_answer": include_answer,
-            "include_raw_content": include_raw_content,
-        }
+        attempts = 0
+        max_attempts = len(self.api_keys)
+        last_error = None
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.post(self.BASE_URL, json=payload)
-                response.raise_for_status()
-                data = response.json()
+        while attempts < max_attempts:
+            payload = {
+                "api_key": self._get_current_key(),
+                "query": query,
+                "search_depth": search_depth,
+                "max_results": max_results,
+                "include_answer": include_answer,
+                "include_raw_content": include_raw_content,
+            }
+            attempts += 1
 
-                logger.debug(
-                    "tavily_search_complete",
-                    query=query,
-                    results_count=len(data.get("results", [])),
-                )
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    response = await client.post(self.BASE_URL, json=payload)
 
-                return data
+                    # Check for rotatable errors before raising
+                    if response.status_code >= 400:
+                        if self._should_rotate(response.status_code):
+                            logger.warning(
+                                "tavily_key_error",
+                                status=response.status_code,
+                                key_index=self.current_key_index,
+                            )
+                            if self._rotate_key():
+                                continue
+                        # No more keys or non-rotatable error
+                        response.raise_for_status()
 
-            except httpx.HTTPError as e:
-                logger.error("tavily_search_failed", query=query, error=str(e))
-                raise
+                    data = response.json()
+
+                    logger.debug(
+                        "tavily_search_complete",
+                        query=query,
+                        results_count=len(data.get("results", [])),
+                    )
+
+                    return data
+
+                except httpx.HTTPError as e:
+                    last_error = e
+                    status = getattr(getattr(e, 'response', None), 'status_code', 500)
+                    logger.warning(
+                        "tavily_request_error",
+                        error=str(e),
+                        status=status,
+                        key_index=self.current_key_index,
+                    )
+                    if self._should_rotate(status) and self._rotate_key():
+                        continue
+                    raise
+
+        logger.error("all_tavily_keys_exhausted", total_keys=len(self.api_keys))
+        if last_error:
+            raise last_error
+        raise RuntimeError("All Tavily API keys exhausted")
 
     async def search_company(self, company_name: str, location: str | None = None) -> dict:
         """Search for company information.

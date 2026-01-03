@@ -70,5 +70,23 @@ class Settings(BaseSettings):
     supabase_service_role_key: SecretStr | None = Field(default=None)
     supabase_jwt_secret: SecretStr | None = Field(default=None)
 
+    def get_serpapi_keys(self) -> list[str]:
+        """Get list of SerpAPI keys (supports comma-separated values)."""
+        if not self.serpapi_key:
+            return []
+        return [k.strip() for k in self.serpapi_key.get_secret_value().split(",") if k.strip()]
+
+    def get_tavily_keys(self) -> list[str]:
+        """Get list of Tavily API keys (supports comma-separated values)."""
+        if not self.tavily_api_key:
+            return []
+        return [k.strip() for k in self.tavily_api_key.get_secret_value().split(",") if k.strip()]
+
+    def get_brave_keys(self) -> list[str]:
+        """Get list of Brave API keys (supports comma-separated values)."""
+        if not self.brave_api_key:
+            return []
+        return [k.strip() for k in self.brave_api_key.get_secret_value().split(",") if k.strip()]
+
 
 settings = Settings()
