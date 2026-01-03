@@ -41,7 +41,17 @@ async def get_demo_leads() -> list[LeadResponse]:
                     review_count=lead.get("review_count", 0),
                     score=lead.get("score", 0),
                     tier=lead.get("tier"),
+                    owner_name=lead.get("owner_name"),
+                    linkedin=lead.get("linkedin"),
+                    facebook=lead.get("facebook"),
+                    instagram=lead.get("instagram"),
                     maps_url=lead.get("maps_url"),
+                    place_id=lead.get("place_id"),
+                    price_level=lead.get("price_level"),
+                    photos_count=lead.get("photos_count", 0),
+                    is_claimed=lead.get("is_claimed"),
+                    years_in_business=lead.get("years_in_business"),
+                    outreach=lead.get("outreach"),
                 )
                 for lead in demo_leads
             ]
