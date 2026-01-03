@@ -44,6 +44,10 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
     def lead_callback(lead: FinalLead) -> None:
         job_manager.add_lead(job_id, lead)
 
+    def lead_update_callback(lead: FinalLead) -> None:
+        place_id = lead.scored_lead.lead.raw.place_id
+        job_manager.update_lead(job_id, place_id, lead)
+
     pipeline = Pipeline(
         max_results=job.max_results,
         min_score=job.min_score,
@@ -52,6 +56,7 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
         product_context=job.product_context,
         progress_callback=progress_callback,
         lead_callback=lead_callback,
+        lead_update_callback=lead_update_callback,
     )
 
     # Run async pipeline in new event loop (since we're in a thread)

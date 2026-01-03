@@ -61,6 +61,7 @@ class Pipeline:
         product_context: str | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
         lead_callback: Callable[["FinalLead"], None] | None = None,
+        lead_update_callback: Callable[["FinalLead"], None] | None = None,
     ):
         """Initialize the pipeline.
 
@@ -71,7 +72,8 @@ class Pipeline:
             skip_outreach: Skip outreach message generation.
             product_context: Your product/service description for outreach.
             progress_callback: Callback for progress updates (step, current, total).
-            lead_callback: Callback for each lead processed (for streaming).
+            lead_callback: Callback for each new lead (for streaming/saving).
+            lead_update_callback: Callback when a lead is updated with enriched data.
         """
         self.max_results = max_results if max_results is not None else settings.max_results_per_query
         self.min_score = min_score if min_score is not None else settings.min_score_for_outreach
@@ -80,6 +82,7 @@ class Pipeline:
         self.product_context = product_context
         self.progress_callback = progress_callback
         self.lead_callback = lead_callback
+        self.lead_update_callback = lead_update_callback
 
         # Initialize components - SerpAPI scraper
         if not settings.serpapi_key:
@@ -123,6 +126,9 @@ class Pipeline:
         result = PipelineResult(query=query)
         logger.info("pipeline_started", query=query)
 
+        # Map to track leads by place_id for updates
+        leads_by_place_id: dict[str, FinalLead] = {}
+
         try:
             # Step 1: Scrape Google Maps
             logger.info("step_1_scraping")
@@ -133,6 +139,18 @@ class Pipeline:
             if not raw_leads:
                 logger.warning("no_leads_scraped")
                 return result
+
+            # PROGRESSIVE SAVE: Save leads immediately after scraping with minimal scoring
+            # This ensures leads are persisted even if server restarts during enrichment
+            for raw_lead in raw_leads:
+                minimal_enriched = self._minimal_enrichment(raw_lead)
+                # Quick score with minimal data
+                scored = self.scorer.score_batch([minimal_enriched])[0]
+                final_lead = FinalLead(scored_lead=scored)
+                leads_by_place_id[raw_lead.place_id] = final_lead
+                # Save immediately via callback
+                if self.lead_callback:
+                    self.lead_callback(final_lead)
 
             # Step 2: Enrich leads
             if not self.skip_enrichment:
@@ -156,16 +174,17 @@ class Pipeline:
             # Step 5: Generate outreach
             if not self.skip_outreach and qualified_leads:
                 logger.info("step_5_outreach")
-                final_leads = await self._generate_outreach(qualified_leads)
+                final_leads = await self._generate_outreach(qualified_leads, leads_by_place_id)
                 result.total_with_outreach = len(final_leads)
             else:
                 final_leads = []
                 for lead in qualified_leads:
                     final_lead = FinalLead(scored_lead=lead)
                     final_leads.append(final_lead)
-                    # Call lead callback for streaming (even without outreach)
-                    if self.lead_callback:
-                        self.lead_callback(final_lead)
+                    # Update lead with enriched/scored data
+                    place_id = lead.lead.raw.place_id
+                    if self.lead_update_callback and place_id in leads_by_place_id:
+                        self.lead_update_callback(final_lead)
 
             result.leads = final_leads
 
@@ -471,6 +490,7 @@ class Pipeline:
     async def _generate_outreach(
         self,
         scored_leads: list[ScoredLead],
+        leads_by_place_id: dict[str, FinalLead] | None = None,
     ) -> list[FinalLead]:
         """Generate outreach messages for leads."""
         llm_client = LLMClient()
@@ -486,9 +506,10 @@ class Pipeline:
                 # Run synchronous LLM call in thread pool to avoid blocking event loop
                 final_lead = await asyncio.to_thread(generator.generate, lead)
                 final_leads.append(final_lead)
-                # Call lead callback for streaming
-                if self.lead_callback:
-                    self.lead_callback(final_lead)
+                # Update lead with outreach data (progressive save)
+                place_id = lead.lead.raw.place_id
+                if self.lead_update_callback and leads_by_place_id and place_id in leads_by_place_id:
+                    self.lead_update_callback(final_lead)
             except Exception as e:
                 logger.warning(
                     "outreach_failed",
@@ -497,9 +518,10 @@ class Pipeline:
                 )
                 final_lead = FinalLead(scored_lead=lead)
                 final_leads.append(final_lead)
-                # Still call callback for failed leads
-                if self.lead_callback:
-                    self.lead_callback(final_lead)
+                # Still call update callback for failed leads
+                place_id = lead.lead.raw.place_id
+                if self.lead_update_callback and leads_by_place_id and place_id in leads_by_place_id:
+                    self.lead_update_callback(final_lead)
 
         return final_leads
 

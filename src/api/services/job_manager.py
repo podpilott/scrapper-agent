@@ -267,6 +267,49 @@ class JobManager:
 
         return True
 
+    def update_lead(self, job_id: str, place_id: str, lead: FinalLead) -> bool:
+        """Update an existing lead with enriched data.
+
+        Args:
+            job_id: The job ID.
+            place_id: The place ID to identify the lead.
+            lead: Updated FinalLead object.
+
+        Returns:
+            True if lead was updated, False if not found.
+        """
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+
+        lead_dict = lead.to_flat_dict()
+
+        # Update in-memory storage
+        for i, existing_lead in enumerate(job.leads):
+            if existing_lead.scored_lead.lead.raw.place_id == place_id:
+                job.leads[i] = lead
+                break
+
+        # Add to event buffer (as an update)
+        event = {"type": "lead_update", "data": lead_dict}
+        job.add_event(event)
+
+        # Notify callbacks
+        self._notify_callbacks(job_id, event)
+
+        # Update in database if configured
+        if self.db:
+            try:
+                self.db.update_lead(
+                    job_id=job_id,
+                    place_id=place_id,
+                    lead_data=lead_dict,
+                )
+            except Exception as e:
+                logger.error("db_update_lead_error", job_id=job_id, error=str(e))
+
+        return True
+
     def complete_job(self, job_id: str, summary: JobSummary) -> None:
         """Mark job as completed."""
         job = self._jobs.get(job_id)

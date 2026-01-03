@@ -325,6 +325,79 @@ class DatabaseService:
         result = self.client.table("leads").insert(data).execute()
         return result.data[0] if result.data else {}
 
+    def update_lead(
+        self,
+        job_id: str,
+        place_id: str,
+        lead_data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Update an existing lead with enriched data.
+
+        Args:
+            job_id: The job ID the lead belongs to.
+            place_id: The place ID to identify the lead.
+            lead_data: Updated lead data.
+
+        Returns:
+            Updated lead data or None if not found.
+        """
+        # Helper to convert empty strings to None for nullable fields
+        def clean_value(value, default=None):
+            if value == "" or value is None:
+                return default
+            return value
+
+        # Helper for integer fields
+        def clean_int(value, default=0):
+            if value == "" or value is None:
+                return default
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return default
+
+        data = {
+            "email": clean_value(lead_data.get("email")),
+            "whatsapp": clean_value(lead_data.get("whatsapp")),
+            "score": clean_value(lead_data.get("score"), 0),
+            "tier": clean_value(lead_data.get("tier")),
+            "owner_name": clean_value(lead_data.get("owner_name")),
+            "linkedin": clean_value(lead_data.get("linkedin")),
+            "facebook": clean_value(lead_data.get("facebook")),
+            "instagram": clean_value(lead_data.get("instagram")),
+            "outreach": {
+                "email_subject": clean_value(lead_data.get("email_subject")),
+                "email_body": clean_value(lead_data.get("email_body")),
+                "linkedin_message": clean_value(lead_data.get("linkedin_message")),
+                "whatsapp_message": clean_value(lead_data.get("whatsapp_message")),
+                "cold_call_script": clean_value(lead_data.get("cold_call_script")),
+            } if any([
+                lead_data.get("email_subject"),
+                lead_data.get("whatsapp_message"),
+                lead_data.get("linkedin_message"),
+            ]) else None,
+            "raw_data": lead_data,
+        }
+
+        # Remove None values to avoid overwriting with nulls
+        data = {k: v for k, v in data.items() if v is not None}
+
+        try:
+            result = (
+                self.client.table("leads")
+                .update(data)
+                .eq("job_id", job_id)
+                .eq("place_id", place_id)
+                .execute()
+            )
+            if result.data:
+                logger.debug("lead_updated_in_db", job_id=job_id, place_id=place_id)
+                return result.data[0]
+            return None
+        except Exception as e:
+            logger.warning("update_lead_failed", job_id=job_id, error=str(e))
+            return None
+
     def get_leads_for_job(self, job_id: str) -> list[dict[str, Any]]:
         """Get all leads for a job."""
         result = (
