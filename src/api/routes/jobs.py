@@ -401,6 +401,15 @@ async def get_job_leads(
                         detail="Not authorized to access this job",
                     )
 
+                # Helper to safely parse int fields (handles empty strings)
+                def safe_int(value, default=None):
+                    if value is None or value == "":
+                        return default
+                    try:
+                        return int(value)
+                    except (ValueError, TypeError):
+                        return default
+
                 # Get leads from database
                 db_leads = db.get_leads_for_job(job_id)
                 leads = []
@@ -417,7 +426,7 @@ async def get_job_leads(
                             address=db_lead.get("address"),
                             category=db_lead.get("category"),
                             rating=db_lead.get("rating"),
-                            review_count=db_lead.get("review_count", 0),
+                            review_count=safe_int(db_lead.get("review_count"), 0),
                             score=db_lead.get("score", 0),
                             tier=db_lead.get("tier"),
                             owner_name=db_lead.get("owner_name"),
@@ -428,9 +437,9 @@ async def get_job_leads(
                             # Enhanced fields
                             place_id=db_lead.get("place_id") or raw.get("place_id"),
                             price_level=db_lead.get("price_level") or raw.get("price_level"),
-                            photos_count=db_lead.get("photos_count", 0) or raw.get("photos_count", 0),
+                            photos_count=safe_int(db_lead.get("photos_count"), 0) or safe_int(raw.get("photos_count"), 0),
                             is_claimed=db_lead.get("is_claimed") or raw.get("is_claimed"),
-                            years_in_business=db_lead.get("years_in_business") or raw.get("years_in_business"),
+                            years_in_business=safe_int(db_lead.get("years_in_business")) or safe_int(raw.get("years_in_business")),
                             outreach=db_lead.get("outreach") or raw.get("outreach"),
                         )
                     )
