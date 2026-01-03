@@ -274,7 +274,17 @@ class DatabaseService:
             "photos_count": clean_int(lead_data.get("photos_count"), 0),
             "is_claimed": clean_value(lead_data.get("is_claimed")),
             "years_in_business": clean_int(lead_data.get("years_in_business"), None),
-            "outreach": lead_data.get("outreach"),
+            "outreach": {
+                "email_subject": clean_value(lead_data.get("email_subject")),
+                "email_body": clean_value(lead_data.get("email_body")),
+                "linkedin_message": clean_value(lead_data.get("linkedin_message")),
+                "whatsapp_message": clean_value(lead_data.get("whatsapp_message")),
+                "cold_call_script": clean_value(lead_data.get("cold_call_script")),
+            } if any([
+                lead_data.get("email_subject"),
+                lead_data.get("whatsapp_message"),
+                lead_data.get("linkedin_message"),
+            ]) else None,
             "raw_data": lead_data,
         }
         result = self.client.table("leads").insert(data).execute()
