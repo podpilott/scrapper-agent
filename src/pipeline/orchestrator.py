@@ -67,6 +67,9 @@ class Pipeline:
         lead_callback: Callable[["FinalLead"], bool] | None = None,
         lead_update_callback: Callable[["FinalLead"], None] | None = None,
         saved_place_ids: set[str] | None = None,
+        resume_leads: list["RawLead"] | None = None,
+        resume_step: str | None = None,
+        resume_scored_leads: list["ScoredLead"] | None = None,
     ):
         """Initialize the pipeline.
 
@@ -80,6 +83,9 @@ class Pipeline:
             lead_callback: Callback for each new lead (for streaming/saving). Returns bool.
             lead_update_callback: Callback when a lead is updated with enriched data.
             saved_place_ids: Set of place_ids that were actually saved (for skipping duplicates).
+            resume_leads: List of RawLead objects to resume processing (skip scraping, continue enrichment).
+            resume_step: Step name to resume from (e.g., "Generating outreach" to skip enrichment/scoring).
+            resume_scored_leads: List of ScoredLead objects for outreach-only resume (skip enrichment/scoring).
         """
         self.max_results = max_results if max_results is not None else settings.max_results_per_query
         self.min_score = min_score if min_score is not None else settings.min_score_for_outreach
@@ -90,6 +96,9 @@ class Pipeline:
         self.lead_callback = lead_callback
         self.lead_update_callback = lead_update_callback
         self.saved_place_ids = saved_place_ids
+        self.resume_leads = resume_leads or []
+        self.resume_step = resume_step
+        self.resume_scored_leads = resume_scored_leads or []
 
         # Initialize components - SerpAPI scraper
         if not settings.serpapi_key:
@@ -131,47 +140,98 @@ class Pipeline:
             PipelineResult with all data and export paths.
         """
         result = PipelineResult(query=query)
-        logger.info("pipeline_started", query=query)
+        logger.info(
+            "pipeline_started",
+            query=query,
+            resume_count=len(self.resume_leads),
+            resume_step=self.resume_step,
+            resume_scored_count=len(self.resume_scored_leads),
+        )
 
         # Map to track leads by place_id for updates
         leads_by_place_id: dict[str, FinalLead] = {}
 
         try:
-            # Step 1: Scrape Google Maps
-            logger.info("step_1_scraping")
-            raw_leads = await self.maps_scraper.scrape(query)
-            result.total_scraped = len(raw_leads)
-            self._progress("Scraping Google Maps", len(raw_leads), len(raw_leads))
+            # OUTREACH-ONLY RESUME: Skip directly to outreach generation
+            if self.resume_scored_leads:
+                logger.info(
+                    "outreach_only_resume",
+                    lead_count=len(self.resume_scored_leads),
+                    resume_step=self.resume_step,
+                )
+                result.total_scraped = len(self.resume_scored_leads)
+                result.total_enriched = len(self.resume_scored_leads)
+                result.total_scored = len(self.resume_scored_leads)
 
-            if not raw_leads:
-                logger.warning("no_leads_scraped")
-                return result
+                # Filter by minimum score (they may have been saved before scoring was complete)
+                qualified_leads = self.scorer.filter_by_min_score(
+                    self.resume_scored_leads, self.min_score
+                )
+                result.total_qualified = len(qualified_leads)
 
-            # PROGRESSIVE SAVE: Save leads immediately after scraping with minimal scoring
-            # This ensures leads are persisted even if server restarts during enrichment
-            # Also tracks which leads were actually saved vs deduplicated
-            saved_raw_leads = []
-            for raw_lead in raw_leads:
-                minimal_enriched = self._minimal_enrichment(raw_lead)
-                # Quick score with minimal data
-                scored = self.scorer.score_batch([minimal_enriched])[0]
-                final_lead = FinalLead(scored_lead=scored)
-                leads_by_place_id[raw_lead.place_id] = final_lead
-                # Save immediately via callback - returns True if saved, False if duplicate
-                if self.lead_callback:
-                    was_saved = self.lead_callback(final_lead)
-                    if was_saved:
-                        saved_raw_leads.append(raw_lead)
+                self._progress("Resuming outreach", len(qualified_leads), len(qualified_leads))
+
+                # Generate outreach for qualified leads
+                if not self.skip_outreach and qualified_leads:
+                    logger.info("resume_outreach_generation", count=len(qualified_leads))
+                    final_leads = await self._generate_outreach(qualified_leads, leads_by_place_id)
+                    result.total_with_outreach = len(final_leads)
                 else:
-                    saved_raw_leads.append(raw_lead)
+                    final_leads = [FinalLead(scored_lead=lead) for lead in qualified_leads]
 
-            # Only process leads that were actually saved (not duplicates)
-            # This avoids wasting resources on enriching/outreaching duplicate leads
-            leads_to_process = saved_raw_leads if self.saved_place_ids is not None else raw_leads
-
-            if not leads_to_process:
-                logger.info("all_leads_deduplicated")
+                result.leads = final_leads
+                result.completed_at = datetime.utcnow()
+                logger.info(
+                    "pipeline_completed",
+                    total_leads=len(final_leads),
+                    duration=result.duration_seconds,
+                )
                 return result
+
+            # Check if we're resuming with existing leads (from enrichment step)
+            if self.resume_leads:
+                # RESUME MODE: Skip scraping, use existing leads
+                logger.info("resume_mode_active", lead_count=len(self.resume_leads))
+                raw_leads = []  # No new scraping
+                leads_to_process = self.resume_leads
+                result.total_scraped = len(self.resume_leads)
+                self._progress("Resuming job", len(self.resume_leads), len(self.resume_leads))
+            else:
+                # NORMAL MODE: Scrape Google Maps
+                logger.info("step_1_scraping")
+                raw_leads = await self.maps_scraper.scrape(query)
+                result.total_scraped = len(raw_leads)
+                self._progress("Scraping Google Maps", len(raw_leads), len(raw_leads))
+
+                if not raw_leads:
+                    logger.warning("no_leads_scraped")
+                    return result
+
+                # PROGRESSIVE SAVE: Save leads immediately after scraping with minimal scoring
+                # This ensures leads are persisted even if server restarts during enrichment
+                # Also tracks which leads were actually saved vs deduplicated
+                saved_raw_leads = []
+                for raw_lead in raw_leads:
+                    minimal_enriched = self._minimal_enrichment(raw_lead)
+                    # Quick score with minimal data
+                    scored = self.scorer.score_batch([minimal_enriched])[0]
+                    final_lead = FinalLead(scored_lead=scored)
+                    leads_by_place_id[raw_lead.place_id] = final_lead
+                    # Save immediately via callback - returns True if saved, False if duplicate
+                    if self.lead_callback:
+                        was_saved = self.lead_callback(final_lead)
+                        if was_saved:
+                            saved_raw_leads.append(raw_lead)
+                    else:
+                        saved_raw_leads.append(raw_lead)
+
+                # Only process leads that were actually saved (not duplicates)
+                # This avoids wasting resources on enriching/outreaching duplicate leads
+                leads_to_process = saved_raw_leads if self.saved_place_ids is not None else raw_leads
+
+                if not leads_to_process:
+                    logger.info("all_leads_deduplicated")
+                    return result
 
             # Step 2: Enrich leads (only non-duplicates)
             if not self.skip_enrichment:

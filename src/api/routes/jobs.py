@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from slowapi import Limiter
 import jwt
@@ -366,7 +366,9 @@ async def get_job_leads(
     # First try in-memory job
     job = job_manager.get_job(job_id)
 
-    if job:
+    # Use in-memory leads only if job exists AND has leads
+    # (Resumed jobs may have empty in-memory leads but leads in DB)
+    if job and job.leads:
         # Check ownership
         if job.user_id != auth_user.user_id and auth_user.user_id != "dev-user":
             raise HTTPException(
@@ -632,6 +634,87 @@ async def cancel_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to cancel job",
         )
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    auth_user: AuthUser = Depends(verify_supabase_token),
+) -> dict:
+    """Resume a failed or cancelled job from where it left off.
+
+    This endpoint:
+    1. Validates the job is resumable (status=failed/cancelled, belongs to user)
+    2. Loads existing leads to skip re-processing
+    3. Resets job status and restarts the pipeline
+
+    Returns immediately. Connect to SSE endpoint for updates.
+    """
+    db = _get_db_service()
+    if not db:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Resume requires database. Database not configured.",
+        )
+
+    # Get job from database
+    db_job = db.get_job(job_id)
+    if not db_job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found",
+        )
+
+    # Check ownership
+    if db_job["user_id"] != auth_user.user_id and auth_user.user_id != "dev-user":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to resume this job",
+        )
+
+    # Only failed or cancelled jobs can be resumed
+    if db_job["status"] not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot resume job with status: {db_job['status']}. Only failed or cancelled jobs can be resumed.",
+        )
+
+    # Check concurrency limit
+    can_start, error_message = job_manager.can_start_job(user_id=auth_user.user_id)
+    if not can_start:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=error_message,
+        )
+
+    # Prepare job for resume (loads skip_place_ids, resets status)
+    job = job_manager.prepare_for_resume(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to prepare job for resume",
+        )
+
+    # Import and run scrape job
+    from src.api.routes.scrape import run_scrape_job
+
+    background_tasks.add_task(run_scrape_job, job)
+
+    skip_count = len(job.skip_place_ids)
+    logger.info(
+        "job_resume_started",
+        job_id=job_id,
+        skip_leads=skip_count,
+        user_id=auth_user.user_id,
+    )
+
+    return {
+        "message": f"Job {job_id} resumed",
+        "status": "pending",
+        "skip_leads": skip_count,
+        "stream_url": f"/api/jobs/{job_id}/stream",
+    }
 
 
 @router.delete("/jobs/{job_id}/delete")

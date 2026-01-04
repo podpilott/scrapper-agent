@@ -73,24 +73,39 @@ def sanitize_query(query: str) -> str:
     return query[:MAX_QUERY_LENGTH].strip()
 
 
-QUERY_ENHANCE_PROMPT = """Analyze this Google Maps search query: "{query}"
+QUERY_ENHANCE_PROMPT = """You are a Google Maps search optimization expert for B2B lead generation.
 
-Determine:
-1. Is this a specific company/brand name (e.g., "Starbucks", "Phincon", "McDonald's")
-2. Is this a business category + location (e.g., "coffee shops in Jakarta")
-3. Is this missing a location (e.g., just "restaurants")
+Analyze this search query: "{query}"
 
-Return a JSON object with:
-- "query_type": "company" | "category_no_location" | "good"
-- "suggestions": Array of 2-3 improved queries if the query is problematic
+CLASSIFICATION:
+1. **company** - Specific company/brand name (e.g., "Starbucks", "Phincon", "Gojek")
+   - Problem: Returns only 1 business, wastes scraping quota
+   - Solution: Suggest the CATEGORY this company belongs to
 
-Example responses:
-- Input: "phincon" -> {{"query_type": "company", "suggestions": ["IT companies in Jakarta", "software companies in Indonesia"]}}
-- Input: "restaurants" -> {{"query_type": "category_no_location", "suggestions": ["restaurants in Jakarta", "restaurants near me"]}}
-- Input: "coffee shops in Kemang" -> {{"query_type": "good", "suggestions": []}}
+2. **category_no_location** - Business category without location (e.g., "restaurants", "lawyers")
+   - Problem: Google Maps returns random/nearby results, inconsistent data
+   - Solution: Add specific location for targeted, high-quality leads
 
-Return ONLY valid JSON, no other text.
-"""
+3. **good** - Category + location (e.g., "coffee shops in Kemang", "lawyers Bandung")
+   - This is optimal for lead generation!
+
+WHEN SUGGESTING ALTERNATIVES, BE STRATEGIC:
+- For company names: What industry/category are they in? Suggest that category + likely location
+- For no-location: Suggest popular Indonesian business districts (Kemang, Sudirman, Senopati, etc.)
+- Think about what would yield the BEST B2B leads for sales outreach
+
+Return JSON:
+{{
+  "query_type": "company" | "category_no_location" | "good",
+  "suggestions": ["strategic suggestion 1", "strategic suggestion 2", "strategic suggestion 3"]
+}}
+
+Examples:
+- "tokopedia" → {{"query_type": "company", "suggestions": ["e-commerce companies Jakarta", "tech startups Jakarta", "marketplace companies Indonesia"]}}
+- "dentists" → {{"query_type": "category_no_location", "suggestions": ["dentists in Jakarta Selatan", "dental clinics Kemang", "dentists BSD City"]}}
+- "web developers in Surabaya" → {{"query_type": "good", "suggestions": []}}
+
+Return ONLY valid JSON."""
 
 
 @router.post("/query/enhance", response_model=QueryEnhanceResponse)
@@ -190,21 +205,40 @@ async def enhance_query(
 
 # ============== Duplicate Query Check Endpoint ==============
 
-QUERY_SUGGESTION_PROMPT = """Given a Google Maps search query that the user has already searched before,
-suggest 3 alternative queries that would find DIFFERENT businesses.
+QUERY_SUGGESTION_PROMPT = """You are a B2B lead generation strategist. A user has already searched for businesses using this query:
 
 Original query: "{query}"
-Previously searched: {existing_queries}
+Their search history: {existing_queries}
 
-Rules:
-1. Suggest related but different business categories
-2. Suggest nearby locations or expanded areas
-3. Suggest more specific niches within the category
-4. Each suggestion should be a complete, searchable query
-5. Keep suggestions practical and useful for lead generation
+Generate 3 STRATEGIC alternative queries to find NEW, UNTAPPED leads. Think creatively:
 
-Return ONLY a JSON array of 3 strings, no explanation.
-Example: ["suggestion 1", "suggestion 2", "suggestion 3"]"""
+STRATEGIES TO CONSIDER:
+1. **Upstream/Downstream**: Who supplies to or buys from these businesses?
+   - "restaurants in Jakarta" → "food suppliers Jakarta" or "restaurant equipment suppliers Jakarta"
+
+2. **Complementary Services**: What businesses work alongside them?
+   - "lawyers in Bandung" → "notary public Bandung" or "accounting firms Bandung"
+
+3. **Niche Specialization**: Break into specific sub-categories
+   - "gyms in Surabaya" → "CrossFit boxes Surabaya" or "yoga studios Surabaya"
+
+4. **Adjacent Locations**: Nearby areas they might have missed
+   - "cafes in Kemang" → "cafes in Senopati" or "cafes in Cipete"
+
+5. **Different Business Types**: Same need, different industry
+   - "marketing agencies Jakarta" → "freelance marketing consultants Jakarta"
+
+6. **Emerging Trends**: Modern variations of the category
+   - "travel agencies Bali" → "tour guides Bali" or "travel influencers Bali"
+
+RULES:
+- Each suggestion must find DIFFERENT businesses (no overlap with original query)
+- Keep it practical - must be searchable on Google Maps
+- Include location for each suggestion
+- Prioritize high-value B2B leads
+
+Return ONLY a JSON array of 3 strings. Be creative and strategic!
+Example: ["upstream supplier query", "complementary service query", "niche specialization query"]"""
 
 
 def _generate_fallback_suggestions(query: str) -> list[str]:
@@ -221,7 +255,19 @@ def _generate_fallback_suggestions(query: str) -> list[str]:
 
 
 def _generate_query_suggestions(query: str, similar_jobs: list[dict]) -> list[str]:
-    """Use LLM to generate alternative query suggestions."""
+    """Use LLM to generate alternative query suggestions (with caching).
+
+    Checks cache first. On cache miss, calls LLM and caches the result.
+    Cache TTL is 7 days to reduce LLM API costs.
+    """
+    # Check cache first
+    if db_service.is_configured():
+        cached = db_service.get_cached_suggestions(query)
+        if cached:
+            logger.info("query_suggestions_cache_hit", query=query)
+            return cached
+
+    # Cache miss - generate with LLM
     existing_queries = [j["query"] for j in similar_jobs]
 
     prompt = QUERY_SUGGESTION_PROMPT.format(
@@ -243,7 +289,14 @@ def _generate_query_suggestions(query: str, similar_jobs: list[dict]) -> list[st
 
         suggestions = json.loads(response_text)
         if isinstance(suggestions, list):
-            return [s for s in suggestions if isinstance(s, str)][:3]
+            result = [s for s in suggestions if isinstance(s, str)][:3]
+
+            # Cache the result for future queries
+            if db_service.is_configured() and result:
+                db_service.cache_suggestions(query, result)
+                logger.info("query_suggestions_cached", query=query)
+
+            return result
     except Exception as e:
         logger.warning("query_suggestion_failed", error=str(e))
 

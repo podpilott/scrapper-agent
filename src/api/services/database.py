@@ -198,6 +198,90 @@ class DatabaseService:
         logger.info("job_cancelled_in_db", job_id=job_id)
         return True
 
+    def update_job_checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+    ) -> None:
+        """Update job checkpoint for resume functionality.
+
+        Args:
+            job_id: The job ID.
+            checkpoint: Checkpoint data with step, processed_place_ids, etc.
+        """
+        self.client.table("jobs").update({
+            "checkpoint": checkpoint
+        }).eq("job_id", job_id).execute()
+        logger.debug("job_checkpoint_updated", job_id=job_id)
+
+    def reset_job_for_resume(self, job_id: str) -> bool:
+        """Reset a failed or cancelled job for resumption.
+
+        Args:
+            job_id: The job ID to resume.
+
+        Returns:
+            True if job was reset, False if not found or not resumable.
+        """
+        job = self.get_job(job_id)
+        if not job or job["status"] not in ("failed", "cancelled"):
+            return False
+
+        data = {
+            "status": "pending",
+            "completed_at": None,
+            "error": None,
+        }
+        self.client.table("jobs").update(data).eq("job_id", job_id).execute()
+        logger.info("job_reset_for_resume", job_id=job_id)
+        return True
+
+    def get_job_lead_count(self, job_id: str) -> int:
+        """Get count of leads for a job.
+
+        Args:
+            job_id: The job ID.
+
+        Returns:
+            Number of leads for this job.
+        """
+        try:
+            result = (
+                self.client.table("leads")
+                .select("id", count="exact")
+                .eq("job_id", job_id)
+                .execute()
+            )
+            return result.count or 0
+        except Exception as e:
+            logger.warning("get_job_lead_count_failed", job_id=job_id, error=str(e))
+            return 0
+
+    def get_job_place_ids(self, job_id: str) -> set[str]:
+        """Get all place_ids for leads in a job.
+
+        Args:
+            job_id: The job ID.
+
+        Returns:
+            Set of place_ids for existing leads.
+        """
+        try:
+            result = (
+                self.client.table("leads")
+                .select("place_id")
+                .eq("job_id", job_id)
+                .execute()
+            )
+            return {
+                lead["place_id"]
+                for lead in (result.data or [])
+                if lead.get("place_id")
+            }
+        except Exception as e:
+            logger.warning("get_job_place_ids_failed", job_id=job_id, error=str(e))
+            return set()
+
     # ============== Lead Operations ==============
 
     def check_lead_exists(
@@ -409,6 +493,33 @@ class DatabaseService:
         )
         return result.data or []
 
+    def get_unenriched_leads_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        """Get leads that need enrichment for a resumed job.
+
+        For resume, we return ALL leads for the job since we want to
+        re-process them through enrichment, scoring, and outreach.
+        The pipeline will update the existing records.
+
+        Args:
+            job_id: The job ID.
+
+        Returns:
+            List of lead data dicts to process.
+        """
+        try:
+            # Return all leads for the job - pipeline will update them
+            result = (
+                self.client.table("leads")
+                .select("*")
+                .eq("job_id", job_id)
+                .order("created_at", desc=False)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.warning("get_unenriched_leads_failed", job_id=job_id, error=str(e))
+            return []
+
     def get_leads_for_user(self, user_id: str) -> list[dict[str, Any]]:
         """Get all leads for a user."""
         result = (
@@ -553,6 +664,84 @@ class DatabaseService:
         """Get public demo leads."""
         result = self.client.table("demo_leads").select("*").limit(10).execute()
         return result.data or []
+
+    # ============== Query Suggestions Cache ==============
+
+    def get_cached_suggestions(self, query: str) -> list[str] | None:
+        """Get cached LLM suggestions for a query.
+
+        Args:
+            query: The search query (will be normalized).
+
+        Returns:
+            List of suggestion strings if found and not expired, None otherwise.
+        """
+        try:
+            query_normalized = query.lower().strip()
+            now = datetime.utcnow().isoformat()
+
+            result = (
+                self.client.table("query_suggestions_cache")
+                .select("suggestions")
+                .eq("query_normalized", query_normalized)
+                .gt("expires_at", now)
+                .limit(1)
+                .execute()
+            )
+
+            if result.data:
+                logger.debug("suggestions_cache_hit", query=query_normalized)
+                return result.data[0].get("suggestions", [])
+
+            return None
+        except Exception as e:
+            logger.warning("get_cached_suggestions_failed", error=str(e))
+            return None
+
+    def cache_suggestions(self, query: str, suggestions: list[str]) -> None:
+        """Cache LLM suggestions for a query.
+
+        Args:
+            query: The search query (will be normalized).
+            suggestions: List of suggestion strings to cache.
+        """
+        try:
+            query_normalized = query.lower().strip()
+            expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+
+            # Upsert: insert or update if exists
+            self.client.table("query_suggestions_cache").upsert({
+                "query_normalized": query_normalized,
+                "suggestions": suggestions,
+                "created_at": datetime.utcnow().isoformat(),
+                "expires_at": expires_at,
+            }, on_conflict="query_normalized").execute()
+
+            logger.debug("suggestions_cached", query=query_normalized)
+        except Exception as e:
+            logger.warning("cache_suggestions_failed", error=str(e))
+
+    def cleanup_expired_suggestions(self) -> int:
+        """Delete expired suggestion cache entries.
+
+        Returns:
+            Number of entries deleted.
+        """
+        try:
+            now = datetime.utcnow().isoformat()
+            result = (
+                self.client.table("query_suggestions_cache")
+                .delete()
+                .lt("expires_at", now)
+                .execute()
+            )
+            count = len(result.data) if result.data else 0
+            if count > 0:
+                logger.info("expired_suggestions_cleaned", count=count)
+            return count
+        except Exception as e:
+            logger.warning("cleanup_expired_suggestions_failed", error=str(e))
+            return 0
 
     # ============== Ban Operations ==============
 

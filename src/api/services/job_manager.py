@@ -48,6 +48,11 @@ class Job:
     # Cancellation
     cancel_requested: bool = False
 
+    # Resume checkpoint
+    checkpoint: dict[str, Any] | None = None
+    skip_place_ids: set[str] = field(default_factory=set)
+    resume_step: str | None = None  # Step to resume from (e.g., "Generating outreach messages")
+
     def add_event(self, event: dict[str, Any]) -> None:
         """Add event to buffer for reconnection support."""
         self.event_buffer.append(event)
@@ -224,6 +229,14 @@ class JobManager:
             return False, None
 
         lead_dict = lead.to_flat_dict()
+        place_id = lead_dict.get("place_id")
+
+        # Check for same-job duplicates (in-memory)
+        if place_id:
+            for existing_lead in job.leads:
+                if existing_lead.scored_lead.lead.raw.place_id == place_id:
+                    logger.debug("same_job_duplicate_skipped", place_id=place_id)
+                    return False, job_id
 
         # Check for cross-job duplicates in database
         if self.db:
@@ -379,6 +392,111 @@ class JobManager:
         """Check if job cancellation was requested."""
         job = self._jobs.get(job_id)
         return job.cancel_requested if job else False
+
+    def update_checkpoint(
+        self,
+        job_id: str,
+        step: str,
+        processed_place_ids: list[str],
+        last_index: int,
+    ) -> None:
+        """Update job checkpoint for resume support.
+
+        Args:
+            job_id: The job ID.
+            step: Current pipeline step.
+            processed_place_ids: List of place_ids already processed.
+            last_index: Last processed index in the current step.
+        """
+        job = self._jobs.get(job_id)
+        if job:
+            checkpoint = {
+                "step": step,
+                "processed_place_ids": processed_place_ids,
+                "last_index": last_index,
+                "saved_at": datetime.utcnow().isoformat(),
+            }
+            job.checkpoint = checkpoint
+
+            # Persist to database if configured
+            if self.db:
+                try:
+                    self.db.update_job_checkpoint(job_id, checkpoint)
+                except Exception as e:
+                    logger.error("db_update_checkpoint_error", job_id=job_id, error=str(e))
+
+    def prepare_for_resume(self, job_id: str) -> Job | None:
+        """Prepare a failed or cancelled job for resumption.
+
+        Loads the job from database, gets existing place_ids to skip,
+        and resets the job status.
+
+        Args:
+            job_id: The job ID to resume.
+
+        Returns:
+            Job object ready for resumption, or None if not resumable.
+        """
+        if not self.db:
+            logger.warning("resume_not_available", reason="database_not_configured")
+            return None
+
+        # Get job from database
+        job_data = self.db.get_job(job_id)
+        if not job_data:
+            logger.warning("resume_job_not_found", job_id=job_id)
+            return None
+
+        if job_data["status"] not in ("failed", "cancelled"):
+            logger.warning("resume_job_not_resumable", job_id=job_id, status=job_data["status"])
+            return None
+
+        # Get existing place_ids to skip
+        skip_place_ids = self.db.get_job_place_ids(job_id)
+        lead_count = len(skip_place_ids)
+
+        if lead_count == 0:
+            logger.info("resume_no_leads", job_id=job_id)
+            # No leads to resume from - will essentially restart
+
+        # Reset job in database
+        if not self.db.reset_job_for_resume(job_id):
+            logger.error("resume_reset_failed", job_id=job_id)
+            return None
+
+        # Extract resume step from checkpoint
+        checkpoint = job_data.get("checkpoint")
+        resume_step = None
+        if checkpoint and isinstance(checkpoint, dict):
+            resume_step = checkpoint.get("step")
+
+        # Create in-memory job object
+        job = Job(
+            job_id=job_data["job_id"],
+            query=job_data["query"],
+            status="pending",
+            user_id=job_data["user_id"],
+            max_results=job_data.get("max_results", 20),
+            min_score=job_data.get("min_score", 0),
+            skip_enrichment=job_data.get("skip_enrichment", False),
+            skip_outreach=job_data.get("skip_outreach", False),
+            product_context=job_data.get("product_context"),
+            checkpoint=checkpoint,
+            skip_place_ids=skip_place_ids,
+            resume_step=resume_step,
+        )
+
+        # Add to in-memory storage
+        self._jobs[job_id] = job
+
+        logger.info(
+            "job_prepared_for_resume",
+            job_id=job_id,
+            skip_leads=lead_count,
+            resume_step=resume_step,
+        )
+
+        return job
 
     def can_start_job(self, user_id: str | None = None) -> tuple[bool, str | None]:
         """Check if we can start a new job (both per-user and global limits).
