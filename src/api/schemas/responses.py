@@ -41,7 +41,7 @@ class JobCreatedResponse(BaseModel):
 
     job_id: str
     status: str = "pending"
-    websocket_url: str = Field(..., description="WebSocket URL for real-time updates")
+    stream_url: str = Field(..., description="SSE URL for real-time updates")
 
 
 class JobStatusResponse(BaseModel):
@@ -99,14 +99,6 @@ class JobListResponse(BaseModel):
 
     jobs: list[JobStatusResponse]
     total: int
-
-
-class WebSocketMessage(BaseModel):
-    """Base WebSocket message."""
-
-    type: Literal["status", "lead", "error", "complete"]
-    data: dict[str, Any] | None = None
-    message: str | None = None
 
 
 class SimilarJob(BaseModel):

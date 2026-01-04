@@ -10,10 +10,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config.settings import settings
-from src.api.routes import demo, health, jobs, query, scrape
+from src.api.routes import demo, health, jobs, query, scrape, stream
 from src.api.services.database import db_service
 from src.api.services.job_manager import job_manager
-from src.api.websocket.handler import router as websocket_router
 from src.utils.logger import get_logger
 
 logger = get_logger("app")
@@ -109,7 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(query.router, prefix="/api", tags=["query"])
     app.include_router(scrape.router, prefix="/api", tags=["scrape"])
     app.include_router(jobs.router, prefix="/api", tags=["jobs"])
-    app.include_router(websocket_router, tags=["websocket"])
+    app.include_router(stream.router, prefix="/api", tags=["stream"])
 
     return app
 

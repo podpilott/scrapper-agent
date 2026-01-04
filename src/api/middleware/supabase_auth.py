@@ -1,12 +1,14 @@
 """Supabase JWT authentication middleware with JWKS support."""
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import jwt
-from fastapi import HTTPException, Security, status
+from fastapi import HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
@@ -125,21 +127,57 @@ async def verify_supabase_token(
         )
 
 
-async def verify_websocket_token(token: str | None) -> AuthUser | None:
-    """Verify token from WebSocket query parameter.
+async def verify_sse_token(request: Request) -> AuthUser:
+    """Verify token from query param, cookie, or Authorization header.
+
+    SSE/EventSource doesn't support custom headers, so we accept token via:
+    1. Query parameter: ?token=xxx (preferred for cross-origin)
+    2. Cookie: sb-*-auth-token (Supabase SSR format)
+    3. Authorization header: Bearer xxx (for testing)
 
     Args:
-        token: JWT token from query parameter.
+        request: FastAPI request object.
 
     Returns:
-        AuthUser if valid, None otherwise.
+        AuthUser with user_id from the token.
+
+    Raises:
+        HTTPException: If token is missing, invalid, or expired.
     """
-    # If no Supabase configured, allow all (dev mode)
+    # If no Supabase configured, allow all requests (dev mode)
     if not settings.supabase_url:
         return AuthUser(user_id="dev-user", email="dev@example.com")
 
+    token = None
+
+    # Try query parameter first (for SSE cross-origin)
+    token = request.query_params.get("token")
+
+    # Try cookie (Supabase SSR format)
     if not token:
-        return None
+        for cookie_name, cookie_value in request.cookies.items():
+            if cookie_name.startswith("sb-") and cookie_name.endswith("-auth-token"):
+                try:
+                    # Cookie value is URL-encoded JSON
+                    decoded_value = unquote(cookie_value)
+                    data = json.loads(decoded_value)
+                    token = data.get("access_token")
+                    if token:
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    # Fall back to Authorization header
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated. Missing auth cookie or Authorization header.",
+        )
 
     try:
         # Try JWKS verification first (for ES256 keys)
@@ -166,10 +204,26 @@ async def verify_websocket_token(token: str | None) -> AuthUser | None:
 
         user_id = payload.get("sub")
         if not user_id:
-            return None
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing user ID.",
+            )
 
         email = payload.get("email")
         return AuthUser(user_id=user_id, email=email)
 
-    except Exception:
-        return None
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired.",
+        )
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+        )

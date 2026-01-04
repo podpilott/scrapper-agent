@@ -164,7 +164,7 @@ async def start_scrape(
 ) -> JobCreatedResponse:
     """Start a new scrape job.
 
-    Returns immediately with job_id. Connect to WebSocket for real-time updates.
+    Returns immediately with job_id. Connect to SSE endpoint for real-time updates.
     """
     # Check if user is banned
     if db_service.is_configured():
@@ -219,5 +219,5 @@ async def start_scrape(
     return JobCreatedResponse(
         job_id=job.job_id,
         status="pending",
-        websocket_url=f"/ws/{job.job_id}",
+        stream_url=f"/api/jobs/{job.job_id}/stream",
     )
