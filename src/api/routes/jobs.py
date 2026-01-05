@@ -376,10 +376,26 @@ async def get_job_leads(
                 detail="Not authorized to access this job",
             )
 
+        # Fetch database IDs for leads (needed for Business Research button)
+        db = _get_db_service()
+        place_id_to_db_id: dict[str, str] = {}
+        if db:
+            try:
+                db_leads = db.get_leads_for_job(job_id)
+                for db_lead in db_leads:
+                    place_id = db_lead.get("place_id")
+                    db_id = db_lead.get("id")
+                    if place_id and db_id:
+                        place_id_to_db_id[place_id] = db_id
+            except Exception:
+                pass  # Continue without IDs if DB lookup fails
+
         leads = []
         for lead in job.leads:
+            place_id = lead.scored_lead.lead.raw.place_id
             leads.append(
                 LeadResponse(
+                    id=place_id_to_db_id.get(place_id),  # Add database ID
                     name=lead.name,
                     phone=lead.phone,
                     email=lead.email,
