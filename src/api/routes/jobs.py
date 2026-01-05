@@ -810,6 +810,9 @@ Business Information:
 - Address: {address}
 - Rating: {rating} ({review_count} reviews)
 - Website: {website}
+- Owner/Contact: {owner_name}
+- Social Presence: {social_presence}
+- Lead Score: {score}/100 ({tier} priority)
 
 Product Context (what the user is selling):
 {product_context}
@@ -822,7 +825,7 @@ Provide a JSON response with:
   "talking_points": ["2-3 specific conversation starters based on their business"]
 }}
 
-Be specific and actionable. Base insights on the business type and available data.
+Be specific and actionable. Base insights on the business type, social presence, and available data.
 Return ONLY valid JSON, no markdown or explanation."""
 
 
@@ -876,6 +879,16 @@ async def generate_lead_research(
     # Get product context from job if available
     product_context = job.get("product_context") or "Not specified"
 
+    # Build social presence summary
+    social_links = []
+    if lead.get("linkedin"):
+        social_links.append("LinkedIn")
+    if lead.get("facebook"):
+        social_links.append("Facebook")
+    if lead.get("instagram"):
+        social_links.append("Instagram")
+    social_presence = ", ".join(social_links) if social_links else "No social profiles found"
+
     prompt = RESEARCH_PROMPT.format(
         name=lead.get("name", "Unknown"),
         category=lead.get("category", "Unknown"),
@@ -883,6 +896,10 @@ async def generate_lead_research(
         rating=lead.get("rating", "N/A"),
         review_count=lead.get("review_count", 0),
         website=lead.get("website", "Not available"),
+        owner_name=lead.get("owner_name") or "Not identified",
+        social_presence=social_presence,
+        score=lead.get("score", 0),
+        tier=lead.get("tier", "unscored"),
         product_context=product_context,
     )
 
