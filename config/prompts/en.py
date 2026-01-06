@@ -1,4 +1,4 @@
-"""LLM prompt templates for outreach generation."""
+"""English LLM prompt templates for outreach generation."""
 
 EMAIL_OUTREACH_PROMPT = """Generate a personalized cold email for lead outreach.
 
@@ -124,3 +124,34 @@ Format as a script with [PAUSE] markers for natural conversation.
 """
 
 DEFAULT_PRODUCT_CONTEXT = """We help local businesses improve their online presence and attract more customers through digital marketing solutions."""
+
+LEAD_RESEARCH_PROMPT = """Analyze this business lead and provide a research brief.
+
+Business Information:
+- Name: {name}
+- Category: {category}
+- Address: {address}
+- Rating: {rating} ({review_count} reviews)
+- Website: {website}
+- Owner/Contact: {owner_name}
+- Social Presence: {social_presence}
+- Lead Score: {score}/100 ({tier} priority)
+
+Product Context (what the user is selling):
+{product_context}
+
+Provide a JSON response with:
+{{
+  "overview": "2-3 sentence summary of what this business does and their market position",
+  "pain_points": ["3-5 potential pain points or challenges they might face"],
+  "opportunities": ["2-3 reasons they might need the user's product/service"],
+  "talking_points": ["2-3 specific conversation starters based on their business"]
+}}
+
+IMPORTANT:
+- Be specific and actionable
+- Base insights on the business type, social presence, and available data
+- Return ONLY valid JSON, no markdown or explanation
+- Ensure all quotes within strings are properly escaped
+- Do not use double quotes within string values, use single quotes if needed
+- Ensure the JSON is completely valid"""

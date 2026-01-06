@@ -802,33 +802,6 @@ async def delete_job(
 
 # ============== Lead Research Endpoint ==============
 
-RESEARCH_PROMPT = """Analyze this business lead and provide a research brief.
-
-Business Information:
-- Name: {name}
-- Category: {category}
-- Address: {address}
-- Rating: {rating} ({review_count} reviews)
-- Website: {website}
-- Owner/Contact: {owner_name}
-- Social Presence: {social_presence}
-- Lead Score: {score}/100 ({tier} priority)
-
-Product Context (what the user is selling):
-{product_context}
-
-Provide a JSON response with:
-{{
-  "overview": "2-3 sentence summary of what this business does and their market position",
-  "pain_points": ["3-5 potential pain points or challenges they might face"],
-  "opportunities": ["2-3 reasons they might need the user's product/service"],
-  "talking_points": ["2-3 specific conversation starters based on their business"]
-}}
-
-Be specific and actionable. Base insights on the business type, social presence, and available data.
-Return ONLY valid JSON, no markdown or explanation."""
-
-
 @router.post("/leads/{lead_id}/research", response_model=LeadResearchResponse)
 @limiter.limit("10/minute")
 async def generate_lead_research(
@@ -873,7 +846,14 @@ async def generate_lead_research(
             cached=True,
         )
 
-    # Generate research using LLM
+    # Get language from job (defaults to 'en')
+    language = job.get("language", "en")
+
+    # Load language-specific prompts
+    from config.prompts import get_prompts
+    prompts = get_prompts(language)
+
+    # Generate research using LLM with language-specific prompt
     from src.generators.llm import LLMClient
 
     # Get product context from job if available
@@ -887,16 +867,16 @@ async def generate_lead_research(
         social_links.append("Facebook")
     if lead.get("instagram"):
         social_links.append("Instagram")
-    social_presence = ", ".join(social_links) if social_links else "No social profiles found"
+    social_presence = ", ".join(social_links) if social_links else ("No social profiles found" if language == "en" else "Tidak ada profil sosial ditemukan")
 
-    prompt = RESEARCH_PROMPT.format(
+    prompt = prompts.LEAD_RESEARCH_PROMPT.format(
         name=lead.get("name", "Unknown"),
         category=lead.get("category", "Unknown"),
         address=lead.get("address", "Unknown"),
         rating=lead.get("rating", "N/A"),
         review_count=lead.get("review_count", 0),
-        website=lead.get("website", "Not available"),
-        owner_name=lead.get("owner_name") or "Not identified",
+        website=lead.get("website", "Not available" if language == "en" else "Tidak tersedia"),
+        owner_name=lead.get("owner_name") or ("Not identified" if language == "en" else "Tidak teridentifikasi"),
         social_presence=social_presence,
         score=lead.get("score", 0),
         tier=lead.get("tier", "unscored"),
@@ -909,19 +889,76 @@ async def generate_lead_research(
 
         # Parse JSON response - handle potential markdown code blocks
         response_text = response.strip()
+
+        # Log the raw response for debugging
+        logger.debug("lead_research_raw_response", lead_id=lead_id, response=response_text[:500])
+
+        # Remove markdown code blocks if present
         if response_text.startswith("```"):
             lines = response_text.split("\n")
-            response_text = "\n".join(
-                line for line in lines[1:-1] if not line.startswith("```")
-            )
+            # Find the actual JSON content between code fences
+            json_lines = []
+            in_code_block = False
+            for line in lines:
+                if line.startswith("```"):
+                    in_code_block = not in_code_block
+                    continue
+                if in_code_block or (not line.startswith("```") and json_lines):
+                    json_lines.append(line)
+            response_text = "\n".join(json_lines).strip()
 
-        research_data = json.loads(response_text)
+        # Try to find JSON object in response if LLM added extra text
+        if not response_text.startswith("{"):
+            # Look for the first { and last }
+            start_idx = response_text.find("{")
+            end_idx = response_text.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                response_text = response_text[start_idx:end_idx + 1]
+
+        # Attempt to parse JSON
+        try:
+            research_data = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, log the problematic response and try to fix common issues
+            logger.error("lead_research_json_parse_attempt1_failed",
+                        lead_id=lead_id,
+                        error=str(e),
+                        response_snippet=response_text[:200])
+
+            # Try to fix common issues: unescaped quotes in strings
+            # This is a fallback - ask LLM to regenerate with stricter instructions
+            fixed_prompt = prompt + "\n\nIMPORTANT: Ensure all quotes within strings are properly escaped. Return only valid JSON."
+            response = llm.generate(fixed_prompt, max_tokens=500, temperature=0.5)
+            response_text = response.strip()
+
+            # Remove markdown again
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                json_lines = []
+                in_code_block = False
+                for line in lines:
+                    if line.startswith("```"):
+                        in_code_block = not in_code_block
+                        continue
+                    if in_code_block or (not line.startswith("```") and json_lines):
+                        json_lines.append(line)
+                response_text = "\n".join(json_lines).strip()
+
+            # Find JSON object
+            if not response_text.startswith("{"):
+                start_idx = response_text.find("{")
+                end_idx = response_text.rfind("}")
+                if start_idx != -1 and end_idx != -1:
+                    response_text = response_text[start_idx:end_idx + 1]
+
+            research_data = json.loads(response_text)
+
         research_data["generated_at"] = datetime.utcnow().isoformat()
 
         # Cache result in database
         db.update_lead_research(lead_id, research_data)
 
-        logger.info("lead_research_generated", lead_id=lead_id, user_id=auth_user.user_id)
+        logger.info("lead_research_generated", lead_id=lead_id, user_id=auth_user.user_id, language=language)
 
         return LeadResearchResponse(
             lead_id=lead_id,
@@ -930,7 +967,10 @@ async def generate_lead_research(
         )
 
     except json.JSONDecodeError as e:
-        logger.error("lead_research_json_parse_failed", lead_id=lead_id, error=str(e))
+        logger.error("lead_research_json_parse_failed",
+                    lead_id=lead_id,
+                    error=str(e),
+                    response=response_text if 'response_text' in locals() else "No response")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to parse research response",

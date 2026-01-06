@@ -63,6 +63,7 @@ class Pipeline:
         skip_enrichment: bool = False,
         skip_outreach: bool = False,
         product_context: str | None = None,
+        language: str = "en",
         progress_callback: Callable[[str, int, int], None] | None = None,
         lead_callback: Callable[["FinalLead"], bool] | None = None,
         lead_update_callback: Callable[["FinalLead"], None] | None = None,
@@ -79,6 +80,7 @@ class Pipeline:
             skip_enrichment: Skip website enrichment step.
             skip_outreach: Skip outreach message generation.
             product_context: Your product/service description for outreach.
+            language: Language for AI-generated messages ('en' or 'id').
             progress_callback: Callback for progress updates (step, current, total).
             lead_callback: Callback for each new lead (for streaming/saving). Returns bool.
             lead_update_callback: Callback when a lead is updated with enriched data.
@@ -92,6 +94,7 @@ class Pipeline:
         self.skip_enrichment = skip_enrichment
         self.skip_outreach = skip_outreach
         self.product_context = product_context
+        self.language = language
         self.progress_callback = progress_callback
         self.lead_callback = lead_callback
         self.lead_update_callback = lead_update_callback
@@ -578,6 +581,7 @@ class Pipeline:
         generator = OutreachGenerator(
             llm_client=llm_client,
             product_context=self.product_context,
+            language=self.language,
         )
 
         final_leads = []

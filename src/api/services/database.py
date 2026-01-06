@@ -83,6 +83,7 @@ class DatabaseService:
         skip_enrichment: bool = False,
         skip_outreach: bool = False,
         product_context: str | None = None,
+        language: str = "en",
     ) -> dict[str, Any]:
         """Create a new job in the database."""
         data = {
@@ -95,6 +96,7 @@ class DatabaseService:
             "skip_enrichment": skip_enrichment,
             "skip_outreach": skip_outreach,
             "product_context": product_context,
+            "language": language,
         }
         result = self.client.table("jobs").insert(data).execute()
         logger.info("job_created_in_db", job_id=job_id, user_id=user_id)

@@ -32,6 +32,7 @@ class Job:
     skip_enrichment: bool = False
     skip_outreach: bool = False
     product_context: str | None = None
+    language: str = "en"
 
     # Progress tracking
     progress: JobProgress | None = None
@@ -92,6 +93,7 @@ class JobManager:
         skip_enrichment: bool = False,
         skip_outreach: bool = False,
         product_context: str | None = None,
+        language: str = "en",
     ) -> Job:
         """Create a new job.
 
@@ -103,6 +105,7 @@ class JobManager:
             skip_enrichment: Skip website enrichment.
             skip_outreach: Skip outreach generation.
             product_context: Product description for outreach.
+            language: Language for AI-generated messages ('en' or 'id').
 
         Returns:
             Created Job object.
@@ -117,6 +120,7 @@ class JobManager:
             skip_enrichment=skip_enrichment,
             skip_outreach=skip_outreach,
             product_context=product_context,
+            language=language,
         )
         self._jobs[job_id] = job
         logger.info("job_created", job_id=job_id, query=query)
@@ -133,6 +137,7 @@ class JobManager:
                     skip_enrichment=skip_enrichment,
                     skip_outreach=skip_outreach,
                     product_context=product_context,
+                    language=language,
                 )
             except Exception as e:
                 logger.error("db_create_job_error", job_id=job_id, error=str(e))

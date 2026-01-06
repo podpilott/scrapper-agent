@@ -31,3 +31,8 @@ class ScrapeRequest(BaseModel):
         default=None,
         description="Description of your product/service for personalized outreach",
     )
+    language: str = Field(
+        default="en",
+        description="Language for AI-generated outreach messages (en=English, id=Indonesian)",
+        pattern="^(en|id)$",
+    )

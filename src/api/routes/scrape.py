@@ -233,6 +233,7 @@ def _run_pipeline_sync(job: Job) -> PipelineResult:
         skip_enrichment=job.skip_enrichment,
         skip_outreach=job.skip_outreach,
         product_context=job.product_context,
+        language=job.language,
         progress_callback=progress_callback,
         lead_callback=lead_callback,
         lead_update_callback=lead_update_callback,
@@ -410,6 +411,7 @@ async def start_scrape(
         skip_enrichment=request.skip_enrichment,
         skip_outreach=request.skip_outreach,
         product_context=product_context,
+        language=request.language,
     )
 
     # Start background task

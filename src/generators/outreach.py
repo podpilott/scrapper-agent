@@ -1,13 +1,6 @@
 """Outreach message generator using LLM."""
 
-from config.prompts import (
-    COLD_CALL_SCRIPT_PROMPT,
-    DEFAULT_PRODUCT_CONTEXT,
-    EMAIL_OUTREACH_PROMPT,
-    EMAIL_SUBJECT_PROMPT,
-    LINKEDIN_MESSAGE_PROMPT,
-    WHATSAPP_MESSAGE_PROMPT,
-)
+from config.prompts import DEFAULT_PRODUCT_CONTEXT, get_prompts
 from src.generators.llm import LLMClient
 from src.models.lead import FinalLead, OutreachMessages, ScoredLead
 from src.utils.logger import get_logger
@@ -22,15 +15,27 @@ class OutreachGenerator:
         self,
         llm_client: LLMClient | None = None,
         product_context: str | None = None,
+        language: str = "en",
     ):
         """Initialize the outreach generator.
 
         Args:
             llm_client: LLM client instance. Creates new one if not provided.
             product_context: Description of your product/service for personalization.
+            language: Language for AI-generated messages ('en' or 'id').
         """
         self.llm = llm_client or LLMClient()
-        self.product_context = product_context or DEFAULT_PRODUCT_CONTEXT
+        self.language = language
+
+        # Load language-specific prompts
+        prompts = get_prompts(language)
+        self.email_outreach_prompt = prompts.EMAIL_OUTREACH_PROMPT
+        self.email_subject_prompt = prompts.EMAIL_SUBJECT_PROMPT
+        self.linkedin_message_prompt = prompts.LINKEDIN_MESSAGE_PROMPT
+        self.whatsapp_message_prompt = prompts.WHATSAPP_MESSAGE_PROMPT
+        self.cold_call_script_prompt = prompts.COLD_CALL_SCRIPT_PROMPT
+
+        self.product_context = product_context or prompts.DEFAULT_PRODUCT_CONTEXT
 
     def generate(self, scored_lead: ScoredLead) -> FinalLead:
         """Generate all outreach messages for a lead.
@@ -92,7 +97,7 @@ class OutreachGenerator:
     def _generate_email_subject(self, context: dict) -> str:
         """Generate email subject line."""
         try:
-            prompt = EMAIL_SUBJECT_PROMPT.format(**context)
+            prompt = self.email_subject_prompt.format(**context)
             return self.llm.generate(prompt, max_tokens=60, temperature=0.7)
         except Exception as e:
             logger.warning("email_subject_failed", error=str(e))
@@ -101,7 +106,7 @@ class OutreachGenerator:
     def _generate_email_body(self, context: dict) -> str:
         """Generate email body."""
         try:
-            prompt = EMAIL_OUTREACH_PROMPT.format(**context)
+            prompt = self.email_outreach_prompt.format(**context)
             return self.llm.generate(prompt, max_tokens=300, temperature=0.7)
         except Exception as e:
             logger.warning("email_body_failed", error=str(e))
@@ -110,7 +115,7 @@ class OutreachGenerator:
     def _generate_linkedin(self, context: dict) -> str:
         """Generate LinkedIn connection message."""
         try:
-            prompt = LINKEDIN_MESSAGE_PROMPT.format(**context)
+            prompt = self.linkedin_message_prompt.format(**context)
             message = self.llm.generate(prompt, max_tokens=150, temperature=0.7)
             # Ensure under 300 char limit
             if len(message) > 300:
@@ -123,7 +128,7 @@ class OutreachGenerator:
     def _generate_whatsapp(self, context: dict) -> str:
         """Generate WhatsApp message."""
         try:
-            prompt = WHATSAPP_MESSAGE_PROMPT.format(**context)
+            prompt = self.whatsapp_message_prompt.format(**context)
             return self.llm.generate(prompt, max_tokens=200, temperature=0.7)
         except Exception as e:
             logger.warning("whatsapp_failed", error=str(e))
@@ -132,7 +137,7 @@ class OutreachGenerator:
     def _generate_cold_call(self, context: dict) -> str:
         """Generate cold call script."""
         try:
-            prompt = COLD_CALL_SCRIPT_PROMPT.format(**context)
+            prompt = self.cold_call_script_prompt.format(**context)
             return self.llm.generate(prompt, max_tokens=400, temperature=0.7)
         except Exception as e:
             logger.warning("cold_call_failed", error=str(e))
