@@ -1,0 +1,64 @@
+name: Keep Supabase Active
+
+# Prevent Supabase free tier from pausing after 7 days of inactivity
+# This workflow runs daily and pings the database to keep it alive
+
+on:
+  # Run daily at midnight UTC
+  schedule:
+    - cron: '0 0 * * *'
+  
+  # Allow manual triggering for testing
+  workflow_dispatch:
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Ping Supabase Database
+        run: |
+          echo "Pinging Supabase to keep it active..."
+          
+          # Ping the health endpoint that queries the database
+          response=$(curl -s -w "\n%{http_code}" \
+            -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/rpc/ping" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Content-Type: application/json")
+          
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n-1)
+          
+          echo "Response code: $http_code"
+          echo "Response body: $body"
+          
+          # Consider 200-299 as success, 404 is also OK (RPC might not exist but connection is made)
+          if [[ $http_code -ge 200 && $http_code -lt 300 ]] || [[ $http_code -eq 404 ]]; then
+            echo "✅ Supabase ping successful!"
+            exit 0
+          else
+            echo "❌ Supabase ping failed with code $http_code"
+            exit 1
+          fi
+      
+      - name: Fallback - Query via REST API
+        if: failure()
+        run: |
+          echo "Trying fallback method - simple table query..."
+          
+          # Try a simple query to any table (this will create a connection)
+          response=$(curl -s -w "\n%{http_code}" \
+            -X GET "${{ secrets.SUPABASE_URL }}/rest/v1/" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}")
+          
+          http_code=$(echo "$response" | tail -n1)
+          
+          echo "Fallback response code: $http_code"
+          
+          if [[ $http_code -ge 200 && $http_code -lt 500 ]]; then
+            echo "✅ Fallback ping successful!"
+            exit 0
+          else
+            echo "❌ All ping methods failed"
+            exit 1
+          fi
